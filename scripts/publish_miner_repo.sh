@@ -5,24 +5,68 @@ set -euo pipefail
 REPO_URL="${POKER44_MODEL_REPO_URL:-https://github.com/Yurii214/poker-44-miner}"
 REMOTE_NAME="${REMOTE_NAME:-yurii-miner}"
 BRANCH="${BRANCH:-main}"
+DEPLOY_KEY="${POKER44_GITHUB_DEPLOY_KEY:-/root/.ssh/poker44_deploy}"
+START_SCRIPT="${POKER44_START_SCRIPT:-/root/bittensor-mining/scripts/start_sn126_miner.sh}"
+COMMIT_PIN_FILE="${POKER44_REPO_COMMIT_FILE:-/root/bittensor-mining/.poker44_repo_commit}"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "${ROOT}"
 
-if [[ -z "${GITHUB_TOKEN:-}" ]]; then
-  echo "Set GITHUB_TOKEN to a classic PAT with 'repo' scope, then re-run."
-  echo "Create one: GitHub → Settings → Developer settings → Personal access tokens"
-  exit 1
+register_deploy_key() {
+  if [[ -z "${GITHUB_TOKEN:-}" ]]; then
+    return 1
+  fi
+  local pub_key
+  pub_key="$(cat "${DEPLOY_KEY}.pub")"
+  curl -fsS -X POST \
+    -H "Authorization: token ${GITHUB_TOKEN}" \
+    -H "Accept: application/vnd.github+json" \
+    "https://api.github.com/repos/Yurii214/poker-44-miner/keys" \
+    -d "$(python3 - <<PY
+import json, sys
+print(json.dumps({
+    "title": "poker44-uid164-deploy",
+    "key": sys.stdin.read().strip(),
+    "read_only": False,
+}))
+PY
+<<<"${pub_key}")" >/dev/null
+}
+
+configure_remote() {
+  if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    local host_path="${REPO_URL#https://}"
+    local push_url="https://${GITHUB_TOKEN}@${host_path}.git"
+    if ! git remote get-url "${REMOTE_NAME}" &>/dev/null; then
+      git remote add "${REMOTE_NAME}" "${push_url}"
+    else
+      git remote set-url "${REMOTE_NAME}" "${push_url}"
+    fi
+    return 0
+  fi
+
+  if [[ -f "${DEPLOY_KEY}" ]]; then
+    if ! git remote get-url "${REMOTE_NAME}" &>/dev/null; then
+      git remote add "${REMOTE_NAME}" "git@github.com:Yurii214/poker-44-miner.git"
+    else
+      git remote set-url "${REMOTE_NAME}" "git@github.com:Yurii214/poker-44-miner.git"
+    fi
+    export GIT_SSH_COMMAND="ssh -i ${DEPLOY_KEY} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+    return 0
+  fi
+
+  echo "No GitHub credentials available."
+  echo "Option A: export GITHUB_TOKEN=<classic PAT with repo scope> && $0"
+  echo "Option B: add deploy key to https://github.com/Yurii214/poker-44-miner/settings/keys"
+  echo "          $(cat "${DEPLOY_KEY}.pub" 2>/dev/null || echo '(deploy key missing)')"
+  return 1
+}
+
+if [[ -n "${GITHUB_TOKEN:-}" ]] && [[ -f "${DEPLOY_KEY}.pub" ]]; then
+  register_deploy_key || true
 fi
 
-HOST_PATH="${REPO_URL#https://}"
-PUSH_URL="https://${GITHUB_TOKEN}@${HOST_PATH}.git"
-
-if ! git remote get-url "${REMOTE_NAME}" &>/dev/null; then
-  git remote add "${REMOTE_NAME}" "${PUSH_URL}"
-else
-  git remote set-url "${REMOTE_NAME}" "${PUSH_URL}"
-fi
+configure_remote
 
 git add \
   neurons/miner.py \
@@ -31,11 +75,10 @@ git add \
   scripts/patch_live_calibration.py \
   scripts/train_innovative_model.py \
   scripts/train_reference_stack.py \
-  scripts/monitor_leaderboard_retune.py
+  scripts/monitor_leaderboard_retune.py \
+  scripts/publish_miner_repo.sh
 
-if git diff --cached --quiet; then
-  echo "No staged changes; pushing current HEAD."
-else
+if ! git diff --cached --quiet; then
   git commit -m "$(cat <<'EOF'
 Publish Poker44 UID 164 miner implementation for manifest compliance.
 
@@ -49,10 +92,38 @@ git push -u "${REMOTE_NAME}" HEAD:"${BRANCH}"
 COMMIT="$(git rev-parse HEAD)"
 git remote set-url "${REMOTE_NAME}" "${REPO_URL}.git"
 
+printf '%s\n' "${COMMIT}" > "${COMMIT_PIN_FILE}"
+
+if [[ -f "${START_SCRIPT}" ]]; then
+  python3 - <<PY
+from pathlib import Path
+import re
+
+path = Path("${START_SCRIPT}")
+text = path.read_text()
+line = f'export POKER44_MODEL_REPO_COMMIT="${COMMIT}"'
+if "POKER44_MODEL_REPO_COMMIT" in text:
+    text = re.sub(
+        r'^export POKER44_MODEL_REPO_COMMIT=.*$',
+        line,
+        text,
+        flags=re.M,
+    )
+else:
+    text = text.replace(
+        '# Set after first push: export POKER44_MODEL_REPO_COMMIT="<40-char-sha>"',
+        line,
+    )
+path.write_text(text)
+PY
+fi
+
+if command -v pm2 >/dev/null 2>&1; then
+  pm2 restart sn126-miner --update-env || true
+fi
+
 echo ""
 echo "Published to ${REPO_URL}"
 echo "Commit: ${COMMIT}"
-echo ""
-echo "Add to /root/bittensor-mining/scripts/start_sn126_miner.sh (or export before restart):"
-echo "  export POKER44_MODEL_REPO_COMMIT=${COMMIT}"
-echo "  pm2 restart sn126-miner --update-env"
+echo "Pinned commit in ${START_SCRIPT}"
+echo "Restarted sn126-miner (if PM2 is available)."
