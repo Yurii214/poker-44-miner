@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
@@ -27,6 +28,26 @@ def _parse_bool(value: str | None, *, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def resolve_repo_commit(repo_root: Path) -> str:
+    """Return the current git commit hash for manifest publication."""
+    env_commit = os.getenv("POKER44_MODEL_REPO_COMMIT", "").strip()
+    if _looks_like_git_commit(env_commit):
+        return env_commit
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        commit = completed.stdout.strip()
+        if _looks_like_git_commit(commit):
+            return commit
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    return ""
 
 
 def _sha256_for_files(paths: Iterable[Path]) -> str:
@@ -81,7 +102,11 @@ def build_local_model_manifest(
         ).strip(),
         "repo_commit": os.getenv(
             "POKER44_MODEL_REPO_COMMIT",
-            str(default_values.get("repo_commit", "")),
+            str(
+                default_values.get("repo_commit")
+                or resolve_repo_commit(repo_root)
+                or ""
+            ),
         ).strip(),
         "artifact_url": os.getenv(
             "POKER44_MODEL_ARTIFACT_URL",

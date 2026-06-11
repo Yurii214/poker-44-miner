@@ -1,0 +1,233 @@
+from __future__ import annotations
+
+from typing import Optional
+
+import numpy as np
+from sklearn.preprocessing import QuantileTransformer
+
+
+class BlendedQuantileCalibrator:
+    """Monotone score spreader for collapsed stacked probabilities."""
+
+    def __init__(self, blend: float = 0.9, max_quantiles: int = 256) -> None:
+        self.blend = float(max(0.0, min(1.0, blend)))
+        self.max_quantiles = int(max(8, max_quantiles))
+        self._qt: Optional[QuantileTransformer] = None
+
+    def fit(self, scores: np.ndarray) -> "BlendedQuantileCalibrator":
+        values = np.asarray(scores, dtype=float).reshape(-1, 1)
+        n_quantiles = int(max(8, min(self.max_quantiles, len(values))))
+        qt = QuantileTransformer(
+            n_quantiles=n_quantiles,
+            output_distribution="uniform",
+            subsample=max(len(values), 1000),
+            random_state=42,
+        )
+        qt.fit(values)
+        self._qt = qt
+        return self
+
+    def transform(self, scores: np.ndarray) -> np.ndarray:
+        values = np.asarray(scores, dtype=float).reshape(-1, 1)
+        if self._qt is None:
+            return np.clip(values.ravel(), 0.0, 1.0)
+        uniformized = self._qt.transform(values).ravel()
+        base = np.clip(values.ravel(), 0.0, 1.0)
+        mixed = self.blend * uniformized + (1.0 - self.blend) * base
+        return np.clip(mixed, 0.0, 1.0)
+
+
+def apply_threshold_logit_remap(
+    scores: np.ndarray,
+    *,
+    threshold: float,
+    temperature: float,
+) -> np.ndarray:
+    values = np.clip(np.asarray(scores, dtype=float), 1e-6, 1.0 - 1e-6)
+    adjusted = (values - float(threshold)) / max(float(temperature), 1e-6)
+    return np.clip(1.0 / (1.0 + np.exp(-np.clip(adjusted, -40.0, 40.0))), 0.0, 1.0)
+
+
+def apply_batch_median_center(
+    scores: np.ndarray,
+    *,
+    blend: float = 0.75,
+) -> np.ndarray:
+    """Re-center a live batch so its median sits near 0.5 before spreading."""
+    values = np.clip(np.asarray(scores, dtype=float), 0.0, 1.0)
+    if values.size <= 1:
+        return values
+    median = float(np.median(values))
+    centered = np.clip(values - median + 0.5, 0.0, 1.0)
+    mix = float(max(0.0, min(1.0, blend)))
+    return np.clip(mix * centered + (1.0 - mix) * values, 0.0, 1.0)
+
+
+def apply_batch_quantile_spread(
+    scores: np.ndarray,
+    *,
+    blend: float = 0.85,
+    min_std: float = 0.02,
+    spread_low: float | None = None,
+    spread_high: float | None = None,
+) -> np.ndarray:
+    """Spread scores within a validator request while preserving rank order."""
+    values = np.clip(np.asarray(scores, dtype=float), 0.0, 1.0)
+    if values.size <= 1:
+        return values
+    if float(values.std()) < min_std:
+        return values
+    calibrator = BlendedQuantileCalibrator(blend=blend, max_quantiles=min(256, values.size))
+    calibrator.fit(values)
+    spread = calibrator.transform(values)
+    if spread_low is None and spread_high is None:
+        return spread
+    low = float(spread_low if spread_low is not None else 0.0)
+    high = float(spread_high if spread_high is not None else 1.0)
+    if high < low:
+        low, high = high, low
+    return np.clip(low + (high - low) * spread, 0.0, 1.0)
+
+
+def simulate_live_batch_scores(
+    scores: np.ndarray,
+    *,
+    batch_size: int = 40,
+    blend: float = 0.85,
+    center_blend: float = 0.0,
+    spread_low: float | None = None,
+    spread_high: float | None = None,
+) -> np.ndarray:
+    """Evaluate calibration as validators see it: one request batch at a time."""
+    values = np.asarray(scores, dtype=float)
+    if values.size == 0:
+        return values
+    batch_size = max(1, int(batch_size))
+    output = np.zeros_like(values)
+    for start in range(0, len(values), batch_size):
+        stop = min(start + batch_size, len(values))
+        batch = values[start:stop]
+        if center_blend > 0.0:
+            batch = apply_batch_median_center(batch, blend=center_blend)
+        output[start:stop] = apply_batch_quantile_spread(
+            batch,
+            blend=blend,
+            spread_low=spread_low,
+            spread_high=spread_high,
+        )
+    return output
+
+
+def apply_score_logit_calibration(
+    scores: np.ndarray,
+    *,
+    bias: float = 0.0,
+    temperature: float = 1.0,
+) -> np.ndarray:
+    """Conservative logit shift used by both training and live inference."""
+    values = np.clip(np.asarray(scores, dtype=float), 1e-6, 1.0 - 1e-6)
+    logits = np.log(values / (1.0 - values))
+    adjusted = (logits - float(bias)) / max(float(temperature), 1e-6)
+    return np.clip(1.0 / (1.0 + np.exp(-np.clip(adjusted, -40.0, 40.0))), 0.0, 1.0)
+
+
+def apply_batch_adaptive_logit(
+    scores: np.ndarray,
+    *,
+    target_median: float = 0.30,
+    temperature: float = 0.85,
+) -> np.ndarray:
+    """Map each live batch median to a safe target while preserving rank spread."""
+    values = np.clip(np.asarray(scores, dtype=float), 1e-6, 1.0 - 1e-6)
+    if values.size <= 1:
+        return apply_score_logit_calibration(values, bias=0.0, temperature=temperature)
+    median = float(np.median(values))
+    target = float(max(0.05, min(0.45, target_median)))
+    median_logit = np.log(median / (1.0 - median))
+    target_logit = np.log(target / (1.0 - target))
+    shift = median_logit - target_logit
+    logits = np.log(values / (1.0 - values)) - shift
+    adjusted = logits / max(float(temperature), 1e-6)
+    return np.clip(1.0 / (1.0 + np.exp(-np.clip(adjusted, -40.0, 40.0))), 0.0, 1.0)
+
+
+def apply_live_positive_cap(
+    scores: np.ndarray,
+    *,
+    max_positive_rate: float = 0.10,
+    score_cap_epsilon: float = 1e-6,
+) -> np.ndarray:
+    """Mirror miner-side cap: keep only the top few scores above 0.5."""
+    values = np.asarray(scores, dtype=float)
+    if values.size == 0:
+        return values
+    max_positive = max(1, int(values.size * max_positive_rate))
+    positive_count = int((values >= 0.5).sum())
+    if positive_count <= max_positive:
+        return values
+    sorted_scores = np.sort(values)[::-1]
+    cutoff = float(sorted_scores[max_positive - 1])
+    scale = (0.5 - score_cap_epsilon) / max(cutoff, score_cap_epsilon)
+    capped = np.where(values >= cutoff, values, values * scale)
+    return np.clip(capped, 0.0, 1.0)
+
+
+def simulate_live_miner_scores(
+    raw_scores: np.ndarray,
+    *,
+    bias: float,
+    temperature: float,
+    batch_size: int = 40,
+    spread_blend: float = 0.85,
+    center_blend: float = 0.0,
+    spread_low: float | None = None,
+    spread_high: float | None = None,
+    max_positive_rate: float = 0.10,
+    logit_mode: str = "fixed",
+    target_median: float = 0.28,
+) -> np.ndarray:
+    """End-to-end live path: batch spread -> logit calibration -> positive cap."""
+    spread = simulate_live_batch_scores(
+        raw_scores,
+        batch_size=batch_size,
+        blend=spread_blend,
+        center_blend=center_blend,
+        spread_low=spread_low,
+        spread_high=spread_high,
+    )
+    output = np.zeros_like(spread)
+    for start in range(0, len(spread), batch_size):
+        stop = min(start + batch_size, len(spread))
+        batch = spread[start:stop]
+        mode = str(logit_mode or "fixed").lower()
+        if mode in {"auto", "adaptive"}:
+            if mode == "auto":
+                median = float(np.median(batch))
+                batch_std = float(batch.std())
+                use_adaptive = median >= 0.52 and batch_std <= 0.04
+            else:
+                use_adaptive = True
+            if use_adaptive:
+                calibrated = apply_batch_adaptive_logit(
+                    batch,
+                    target_median=target_median,
+                    temperature=temperature,
+                )
+            else:
+                calibrated = apply_score_logit_calibration(
+                    batch,
+                    bias=bias,
+                    temperature=temperature,
+                )
+        else:
+            calibrated = apply_score_logit_calibration(
+                batch,
+                bias=bias,
+                temperature=temperature,
+            )
+        output[start:stop] = apply_live_positive_cap(
+            calibrated,
+            max_positive_rate=max_positive_rate,
+        )
+    return output
+

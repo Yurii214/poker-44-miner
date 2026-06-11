@@ -1,9 +1,6 @@
-"""Reference Poker44 miner with simple chunk-level behavioral heuristics."""
-
-# from __future__ import annotations
+"""Reference Poker44 miner with a trained ML bot detector."""
 
 import time
-from collections import Counter
 from pathlib import Path
 from typing import Tuple
 
@@ -16,54 +13,77 @@ from poker44.utils.model_manifest import (
     manifest_digest,
 )
 from poker44.validator.synapse import DetectionSynapse
+from poker44_ml.inference import DEFAULT_MODEL_PATH, Poker44Model
+
+DEFAULT_MAX_POSITIVE_RATE = 0.10
+SCORE_CAP_EPSILON = 1e-6
 
 
 class Miner(BaseMinerNeuron):
-    """
-    Reference heuristic miner.
-
-    It aggregates simple behavior signals over each chunk and returns a bot-risk
-    score per chunk. The goal is not SOTA accuracy, but a deterministic and
-    explainable baseline that is meaningfully better than random.
-    """
+    """Serve chunk-level bot-risk scores from a trained benchmark model."""
 
     def __init__(self, config=None):
         super(Miner, self).__init__(config=config)
-        bt.logging.info("🤖 Heuristic Poker44 Miner started")
         repo_root = Path(__file__).resolve().parents[1]
+        model_path = Path(
+            getattr(getattr(config, "model", None), "path", None) or DEFAULT_MODEL_PATH
+        )
+        if not model_path.is_absolute():
+            model_path = repo_root / model_path
+
+        self.detector = Poker44Model(model_path=model_path)
+        self.max_positive_rate = float(
+            self.detector.metadata.get("live_max_positive_rate", DEFAULT_MAX_POSITIVE_RATE)
+            or DEFAULT_MAX_POSITIVE_RATE
+        )
+        metrics = self.detector.metrics or {}
+        bt.logging.info(
+            f"ML Poker44 Miner started | model={model_path} "
+            f"samples={metrics.get('samples', metrics.get('training_samples', 'unknown'))} "
+            f"ap={metrics.get('average_precision', 'unknown')} "
+            f"fpr={metrics.get('reward_meta', {}).get('fpr', 'unknown')} "
+            f"reward={metrics.get('reward', 'unknown')}"
+        )
+
         self.model_manifest = build_local_model_manifest(
             repo_root=repo_root,
-            implementation_files=[Path(__file__).resolve()],
+            implementation_files=[
+                Path(__file__).resolve(),
+                repo_root / "poker44_ml" / "features.py",
+                repo_root / "poker44_ml" / "inference.py",
+                repo_root / "poker44_ml" / "innovative_model.py",
+                repo_root / "poker44_ml" / "stacked.py",
+                repo_root / "poker44_ml" / "rank_stack.py",
+                repo_root / "poker44_ml" / "calibration.py",
+            ],
             defaults={
-                "model_name": "poker44-reference-heuristic",
-                "model_version": "1",
-                "framework": "python-heuristic",
+                "model_name": self.detector.metadata.get(
+                    "model_name",
+                    "poker44-reference-stack",
+                ),
+                "model_version": self.detector.model_version,
+                "framework": "lightgbm-xgboost-batch-rank-stack-quantile-remap",
                 "license": "MIT",
-                "repo_url": "https://github.com/Poker44/Poker44-subnet",
-                "notes": "Reference heuristic miner shipped with the Poker44 subnet.",
+                "repo_url": "https://github.com/Yurii214/poker-44-miner",
+                "notes": "Reference-style supervised stack trained on public Poker44 benchmark releases.",
                 "open_source": True,
                 "inference_mode": "remote",
                 "training_data_statement": (
-                    "Reference heuristic miner. No training step. Uses only runtime chunk features."
+                    "Trained on public Poker44 benchmark releases fetched from "
+                    "https://api.poker44.net/api/v1/benchmark using miner-visible hand payloads."
                 ),
-                "training_data_sources": ["none"],
+                "training_data_sources": [
+                    "https://api.poker44.net/api/v1/benchmark/releases",
+                ],
                 "private_data_attestation": (
-                    "This reference miner does not train on validator-only evaluation data."
+                    "This miner does not train on validator-only live evaluation labels."
                 ),
+                "artifact_url": str(model_path),
             },
         )
         self.manifest_compliance = evaluate_manifest_compliance(self.model_manifest)
         self.manifest_digest = manifest_digest(self.model_manifest)
         self._log_manifest_startup(repo_root)
-        
-        # # Attach handlers after initialization
-        # self.axon.attach(
-        #     forward_fn = self.forward,
-        #     blacklist_fn = self.blacklist,
-        #     priority_fn = self.priority,
-        # )
-        # bt.logging.info("Attaching forward function to miner axon.")
-        
         bt.logging.info(f"Axon created: {self.axon}")
 
     def _log_manifest_startup(self, repo_root: Path) -> None:
@@ -88,81 +108,78 @@ class Miner(BaseMinerNeuron):
             f"miner_doc={repo_root / 'docs' / 'miner.md'}"
         )
 
+    def _apply_live_positive_cap(self, scores: list[float]) -> list[float]:
+        """Keep live batches under the human-safety cliff while preserving order."""
+        if not scores:
+            return scores
+        max_positive = max(1, int(len(scores) * self.max_positive_rate))
+        positive_count = sum(score >= 0.5 for score in scores)
+        if positive_count <= max_positive:
+            return scores
+
+        sorted_scores = sorted(scores, reverse=True)
+        cutoff = sorted_scores[max_positive - 1]
+        scale = (0.5 - SCORE_CAP_EPSILON) / max(cutoff, SCORE_CAP_EPSILON)
+        capped_scores = [
+            score if score >= cutoff else score * scale
+            for score in scores
+        ]
+        capped_positive_count = sum(score >= 0.5 for score in capped_scores)
+        bt.logging.warning(
+            "Applied live positive cap | "
+            f"count={len(scores)} before={positive_count} "
+            f"after={capped_positive_count} max_allowed={max_positive} "
+            f"rate={self.max_positive_rate:.2f} "
+            f"cutoff={cutoff:.6f}"
+        )
+        return [round(max(0.0, min(1.0, score)), 6) for score in capped_scores]
+
     async def forward(self, synapse: DetectionSynapse) -> DetectionSynapse:
-        """Assign one deterministic bot-risk score per chunk."""
         chunks = synapse.chunks or []
-        scores = [self.score_chunk(chunk) for chunk in chunks]
+        components = self.detector.debug_score_components(chunks)
+        raw_scores = components.get("final_scores") or self.detector.predict_chunk_scores(chunks)
+        scores = self._apply_live_positive_cap(raw_scores)
         synapse.risk_scores = scores
-        synapse.predictions = [s >= 0.5 for s in scores]
+        synapse.predictions = [score >= 0.5 for score in scores]
         synapse.model_manifest = dict(self.model_manifest)
-        bt.logging.info(f"Miner Predctions: {synapse.predictions}")
-        bt.logging.info(f"Scored {len(chunks)} chunks with heuristic risks.")
+        if scores:
+            sorted_scores = sorted(scores, reverse=True)
+            mean_score = sum(scores) / len(scores)
+            top_scores = ", ".join(f"{score:.6f}" for score in sorted_scores[:5])
+            above_50 = sum(score >= 0.5 for score in scores)
+            above_40 = sum(score >= 0.4 for score in scores)
+            above_30 = sum(score >= 0.3 for score in scores)
+            raw = components.get("raw_scores") or []
+            spread = components.get("spread_scores") or []
+            if raw and spread:
+                bt.logging.info(
+                    "Score components | "
+                    f"raw_min={min(raw):.6f} raw_max={max(raw):.6f} "
+                    f"spread_min={min(spread):.6f} spread_max={max(spread):.6f}"
+                )
+            bt.logging.info(
+                "Score distribution | "
+                f"count={len(scores)} min={min(scores):.6f} "
+                f"mean={mean_score:.6f} max={max(scores):.6f} "
+                f"top5=[{top_scores}] >=0.5={above_50} "
+                f">=0.4={above_40} >=0.3={above_30}"
+            )
+        bt.logging.info(f"Miner predictions: {synapse.predictions}")
+        bt.logging.info(f"Scored {len(chunks)} chunks with ML bot-risk scores.")
         return synapse
 
-    @staticmethod
-    def _clamp01(value: float) -> float:
-        return max(0.0, min(1.0, value))
-
-    @classmethod
-    def _score_hand(cls, hand: dict) -> float:
-        actions = hand.get("actions") or []
-        players = hand.get("players") or []
-        streets = hand.get("streets") or []
-        outcome = hand.get("outcome") or {}
-
-        action_counts = Counter(action.get("action_type") for action in actions)
-        meaningful_actions = max(
-            1,
-            sum(
-                action_counts.get(kind, 0)
-                for kind in ("call", "check", "bet", "raise", "fold")
-            ),
-        )
-
-        call_ratio = action_counts.get("call", 0) / meaningful_actions
-        check_ratio = action_counts.get("check", 0) / meaningful_actions
-        fold_ratio = action_counts.get("fold", 0) / meaningful_actions
-        raise_ratio = action_counts.get("raise", 0) / meaningful_actions
-        street_depth = len(streets) / 3.0
-        showdown_flag = 1.0 if outcome.get("showdown") else 0.0
-
-        player_count_signal = 0.0
-        if players:
-            player_count_signal = (6 - min(len(players), 6)) / 4.0
-
-        score = 0.0
-        score += 0.32 * street_depth
-        score += 0.22 * showdown_flag
-        score += 0.18 * cls._clamp01(call_ratio / 0.35)
-        score += 0.12 * cls._clamp01(check_ratio / 0.30)
-        score += 0.08 * cls._clamp01(player_count_signal)
-        score -= 0.18 * cls._clamp01(fold_ratio / 0.55)
-        score -= 0.10 * cls._clamp01(raise_ratio / 0.20)
-
-        return cls._clamp01(score)
-
-    @classmethod
-    def score_chunk(cls, chunk: list[dict]) -> float:
-        if not chunk:
-            return 0.5
-
-        hand_scores = [cls._score_hand(hand) for hand in chunk]
-        avg_score = sum(hand_scores) / len(hand_scores)
-
-        return round(cls._clamp01(avg_score), 6)
-
     async def blacklist(self, synapse: DetectionSynapse) -> Tuple[bool, str]:
-        """Determine whether to blacklist incoming requests."""
         return self.common_blacklist(synapse)
 
     async def priority(self, synapse: DetectionSynapse) -> float:
-        """Assign priority based on caller's stake."""
         return self.caller_priority(synapse)
 
 
 if __name__ == "__main__":
     with Miner() as miner:
-        bt.logging.info("Random miner running...")
+        bt.logging.info("ML miner running...")
         while True:
-            bt.logging.info(f"Miner UID: {miner.uid} | Incentive: {miner.metagraph.I[miner.uid]}")
+            bt.logging.info(
+                f"Miner UID: {miner.uid} | Incentive: {miner.metagraph.I[miner.uid]}"
+            )
             time.sleep(5 * 60)
