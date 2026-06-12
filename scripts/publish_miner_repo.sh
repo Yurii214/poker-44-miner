@@ -106,6 +106,15 @@ EOF
 )"
 fi
 
+python3 recompute_hash.py
+git add models/model_manifest.json
+if ! git diff --cached --quiet; then
+  git commit -m "$(cat <<'EOF'
+Align model_manifest.json repo_commit with release HEAD.
+EOF
+)"
+fi
+
 git push -u "${REMOTE_NAME}" HEAD:"${BRANCH}"
 
 COMMIT="$(git rev-parse HEAD)"

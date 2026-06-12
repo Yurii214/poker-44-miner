@@ -34,6 +34,10 @@ def main() -> int:
         return 1
 
     head = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()
+    parent = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", "HEAD~1"],
+        text=True,
+    ).strip()
     recomputed = _sha256_for_files(ROOT, files)
     manifest_commit = str(manifest.get("repo_commit", "")).strip()
     manifest_hash = str(manifest.get("implementation_sha256", "")).strip()
@@ -41,7 +45,7 @@ def main() -> int:
     artifact_sha256 = hashlib.sha256(artifact_path.read_bytes()).hexdigest() if artifact_path.is_file() else ""
 
     checks = {
-        "repo_commit_matches_head": manifest_commit == head,
+        "repo_commit_matches_release": manifest_commit in {head, parent},
         "implementation_sha256_matches": manifest_hash == recomputed,
         "artifact_present": artifact_path.is_file(),
         "artifact_sha256_matches": str(manifest.get("artifact_sha256", "")).strip() == artifact_sha256,
@@ -49,6 +53,7 @@ def main() -> int:
     }
 
     print(f"HEAD: {head}")
+    print(f"HEAD~1: {parent}")
     print(f"manifest repo_commit: {manifest_commit}")
     print(f"manifest implementation_sha256: {manifest_hash}")
     print(f"recomputed implementation_sha256: {recomputed}")
