@@ -24,6 +24,8 @@ flightplans/*
 model/*
 
 models/*
+!models/bot_detector_v1.joblib
+!models/model_manifest.json
 runs/*
 # C extensions
 *.so

@@ -68,21 +68,40 @@ fi
 
 configure_remote
 
+python3 scripts/generate_release_manifest.py
+chmod +x verify.py recompute_hash.py scripts/generate_release_manifest.py
+
 git add \
+  README.md \
+  verify.py \
+  recompute_hash.py \
   neurons/miner.py \
   poker44_ml/ \
   poker44/utils/model_manifest.py \
+  models/bot_detector_v1.joblib \
+  models/model_manifest.json \
+  scripts/generate_release_manifest.py \
   scripts/patch_live_calibration.py \
   scripts/train_innovative_model.py \
   scripts/train_reference_stack.py \
   scripts/monitor_leaderboard_retune.py \
-  scripts/publish_miner_repo.sh
+  scripts/publish_miner_repo.sh \
+  .gitignore
 
 if ! git diff --cached --quiet; then
   git commit -m "$(cat <<'EOF'
-Publish Poker44 UID 164 miner implementation for manifest compliance.
+Release Poker44 UID 164 miner with manifest attestation and model artifact.
 
-Includes dual-branch inference stack, calibration, and training scripts.
+Adds data_attestation, model card README, verify scripts, and published joblib.
+EOF
+)"
+fi
+
+python3 recompute_hash.py
+git add models/model_manifest.json
+if ! git diff --cached --quiet; then
+  git commit -m "$(cat <<'EOF'
+Pin release model_manifest.json to repository commit hash.
 EOF
 )"
 fi
@@ -111,7 +130,7 @@ if "POKER44_MODEL_REPO_COMMIT" in text:
     )
 else:
     text = text.replace(
-        '# Set after first push: export POKER44_MODEL_REPO_COMMIT="<40-char-sha>"',
+        '# Set automatically by scripts/publish_miner_repo.sh after the first successful push.',
         line,
     )
 path.write_text(text)
@@ -121,6 +140,8 @@ fi
 if command -v pm2 >/dev/null 2>&1; then
   pm2 restart sn126-miner --update-env || true
 fi
+
+python3 verify.py
 
 echo ""
 echo "Published to ${REPO_URL}"

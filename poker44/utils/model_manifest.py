@@ -50,11 +50,36 @@ def resolve_repo_commit(repo_root: Path) -> str:
     return ""
 
 
-def _sha256_for_files(paths: Iterable[Path]) -> str:
+def _manifest_path_label(path: Path, *, repo_root: Path | None = None) -> str:
+    resolved = path.resolve()
+    if repo_root is not None:
+        try:
+            return str(resolved.relative_to(repo_root.resolve()))
+        except ValueError:
+            pass
+    return str(resolved)
+
+
+def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
-    for path in sorted((p.resolve() for p in paths), key=lambda p: str(p)):
-        digest.update(str(path).encode("utf-8"))
-        with path.open("rb") as handle:
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _sha256_for_files(paths: Iterable[Path], *, repo_root: Path | None = None) -> str:
+    digest = hashlib.sha256()
+    labeled_paths = [
+        (_manifest_path_label(path, repo_root=repo_root), path.resolve())
+        for path in paths
+    ]
+    for label, resolved in sorted(labeled_paths, key=lambda item: item[0]):
+        digest.update(label.encode("utf-8"))
+        with resolved.open("rb") as handle:
             while True:
                 chunk = handle.read(1024 * 1024)
                 if not chunk:
@@ -71,7 +96,7 @@ def build_local_model_manifest(
 ) -> Dict[str, Any]:
     """Build a serializable manifest for the miner's current implementation."""
     implementation_paths = [path.resolve() for path in implementation_files]
-    implementation_sha256 = _sha256_for_files(implementation_paths)
+    implementation_sha256 = _sha256_for_files(implementation_paths, repo_root=repo_root)
     default_values = dict(defaults or {})
 
     manifest: Dict[str, Any] = {
@@ -135,6 +160,10 @@ def build_local_model_manifest(
         "private_data_attestation": os.getenv(
             "POKER44_MODEL_PRIVATE_DATA_ATTESTATION",
             str(default_values.get("private_data_attestation", "")),
+        ).strip(),
+        "data_attestation": os.getenv(
+            "POKER44_MODEL_DATA_ATTESTATION",
+            str(default_values.get("data_attestation", "")),
         ).strip(),
         "inference_mode": os.getenv(
             "POKER44_MODEL_INFERENCE_MODE",

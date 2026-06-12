@@ -1,5 +1,6 @@
 """Reference Poker44 miner with a trained ML bot detector."""
 
+import os
 import time
 from pathlib import Path
 from typing import Tuple
@@ -11,6 +12,7 @@ from poker44.utils.model_manifest import (
     build_local_model_manifest,
     evaluate_manifest_compliance,
     manifest_digest,
+    sha256_file,
 )
 from poker44.validator.synapse import DetectionSynapse
 from poker44_ml.inference import DEFAULT_MODEL_PATH, Poker44Model
@@ -45,17 +47,31 @@ class Miner(BaseMinerNeuron):
             f"reward={metrics.get('reward', 'unknown')}"
         )
 
+        implementation_files = [
+            Path(__file__).resolve(),
+            repo_root / "poker44_ml" / "features.py",
+            repo_root / "poker44_ml" / "inference.py",
+            repo_root / "poker44_ml" / "innovative_model.py",
+            repo_root / "poker44_ml" / "stacked.py",
+            repo_root / "poker44_ml" / "rank_stack.py",
+            repo_root / "poker44_ml" / "calibration.py",
+        ]
+        repo_url = os.getenv(
+            "POKER44_MODEL_REPO_URL",
+            "https://github.com/Yurii214/poker-44-miner",
+        ).strip()
+        artifact_rel = "models/bot_detector_v1.joblib"
+        artifact_path = repo_root / artifact_rel
+        artifact_sha256 = (
+            sha256_file(artifact_path) if artifact_path.is_file() else ""
+        )
+        data_statement = (
+            "Trained on public Poker44 benchmark releases fetched from "
+            "https://api.poker44.net/api/v1/benchmark using miner-visible hand payloads."
+        )
         self.model_manifest = build_local_model_manifest(
             repo_root=repo_root,
-            implementation_files=[
-                Path(__file__).resolve(),
-                repo_root / "poker44_ml" / "features.py",
-                repo_root / "poker44_ml" / "inference.py",
-                repo_root / "poker44_ml" / "innovative_model.py",
-                repo_root / "poker44_ml" / "stacked.py",
-                repo_root / "poker44_ml" / "rank_stack.py",
-                repo_root / "poker44_ml" / "calibration.py",
-            ],
+            implementation_files=implementation_files,
             defaults={
                 "model_name": self.detector.metadata.get(
                     "model_name",
@@ -64,21 +80,26 @@ class Miner(BaseMinerNeuron):
                 "model_version": self.detector.model_version,
                 "framework": "lightgbm-xgboost-batch-rank-stack-quantile-remap",
                 "license": "MIT",
-                "repo_url": "https://github.com/Yurii214/poker-44-miner",
-                "notes": "Reference-style supervised stack trained on public Poker44 benchmark releases.",
+                "repo_url": repo_url,
+                "notes": "Dual-branch benchmark stack with bounded live calibration.",
                 "open_source": True,
                 "inference_mode": "remote",
-                "training_data_statement": (
-                    "Trained on public Poker44 benchmark releases fetched from "
-                    "https://api.poker44.net/api/v1/benchmark using miner-visible hand payloads."
-                ),
+                "training_data_statement": data_statement,
                 "training_data_sources": [
                     "https://api.poker44.net/api/v1/benchmark/releases",
                 ],
                 "private_data_attestation": (
                     "This miner does not train on validator-only live evaluation labels."
                 ),
-                "artifact_url": str(model_path),
+                "data_attestation": (
+                    "Training data is limited to public Poker44 benchmark releases "
+                    "and miner-visible hand payloads from api.poker44.net. "
+                    "No validator-private live labels, human PII, or proprietary "
+                    "table data were used."
+                ),
+                "artifact_url": artifact_rel,
+                "artifact_sha256": artifact_sha256,
+                "model_card_url": f"{repo_url.rstrip('/')}/blob/main/README.md",
             },
         )
         self.manifest_compliance = evaluate_manifest_compliance(self.model_manifest)
