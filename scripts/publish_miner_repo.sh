@@ -157,6 +157,22 @@ fi
 
 python3 verify.py
 
+MODEL_VERSION="$(python3 - <<'PY'
+import joblib
+from pathlib import Path
+
+path = Path("models/bot_detector_v1.joblib")
+if path.exists():
+    artifact = joblib.load(path)
+    print(artifact.get("model_version") or artifact.get("metadata", {}).get("model_version", ""))
+PY
+)"
+if [[ -n "${MODEL_VERSION}" ]]; then
+  python3 scripts/deploy_lock.py write \
+    --model-version "${MODEL_VERSION}" \
+    --repo-commit "${COMMIT}"
+fi
+
 echo ""
 echo "Published to ${REPO_URL}"
 echo "Commit: ${COMMIT}"

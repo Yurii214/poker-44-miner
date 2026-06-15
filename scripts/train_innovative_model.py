@@ -26,6 +26,10 @@ from poker44_ml.innovative_model import (
     DualBranchBatchAwareModel,
     transform_batch_relative_rows,
 )
+from poker44_ml.live_augmentation import (
+    build_pseudo_labeled_examples,
+    merge_training_sets,
+)
 from poker44_ml.rank_stack import batch_rank_boost
 from train_reference_stack import (  # noqa: E402
     DEFAULT_STATE_PATH,
@@ -168,8 +172,9 @@ def train_branch_oof(
     seed: int,
     folds: int,
     transform_relative: bool,
+    weights: np.ndarray | None = None,
 ) -> tuple[list[Any], np.ndarray]:
-    weights = sample_weights(y)
+    weights = np.asarray(weights if weights is not None else sample_weights(y), dtype=float)
     specs = make_base_models(seed)
     cv = GroupKFold(n_splits=max(2, min(folds, len(np.unique(groups)))))
     oof = np.zeros((len(y), len(specs)), dtype=float)
@@ -305,10 +310,47 @@ def main() -> None:
     parser.add_argument("--max-fpr", type=float, default=0.04)
     parser.add_argument("--max-positive-rate", type=float, default=0.10)
     parser.add_argument("--deploy", action="store_true")
+    parser.add_argument("--live-augment", action="store_true")
+    parser.add_argument(
+        "--live-store-dir",
+        type=Path,
+        default=REPO_ROOT / "models" / "live_chunks",
+    )
+    parser.add_argument("--pseudo-weight", type=float, default=0.35)
+    parser.add_argument("--pseudo-max-examples", type=int, default=400)
     args = parser.parse_args()
+
+    model_version = MODEL_VERSION
+    training_weights: np.ndarray | None = None
 
     print("Fetching benchmark examples...")
     feature_dicts, y, metadata, benchmark_state = fetch_training_examples()
+    if args.live_augment:
+        pseudo_features, pseudo_labels, pseudo_metadata = build_pseudo_labeled_examples(
+            store_dir=args.live_store_dir,
+            model_path=args.deploy_path if args.deploy_path.exists() else DEFAULT_DEPLOY_PATH,
+            max_examples=args.pseudo_max_examples,
+        )
+        print(
+            f"Live pseudo-labels | examples={len(pseudo_labels)} "
+            f"bot={int(pseudo_labels.sum()) if len(pseudo_labels) else 0} "
+            f"human={int(len(pseudo_labels) - pseudo_labels.sum()) if len(pseudo_labels) else 0}"
+        )
+        if len(pseudo_labels):
+            feature_dicts, y, metadata, training_weights = merge_training_sets(
+                feature_dicts,
+                y,
+                metadata,
+                pseudo_features,
+                pseudo_labels,
+                pseudo_metadata,
+                pseudo_weight=args.pseudo_weight,
+            )
+            benchmark_state["live_pseudo_examples"] = int(len(pseudo_labels))
+            model_version = f"{MODEL_VERSION}-augmented"
+        else:
+            print("No high-confidence live pseudo labels yet; training on benchmark only.")
+
     x, feature_names = vectorize(feature_dicts)
     groups = batch_groups_from_metadata(metadata)
     holdout_mask = holdout_mask_from_metadata(metadata)
@@ -325,6 +367,7 @@ def main() -> None:
         seed=args.seed,
         folds=args.folds,
         transform_relative=False,
+        weights=training_weights,
     )
     rel_models, rel_oof = train_branch_oof(
         x,
@@ -333,6 +376,7 @@ def main() -> None:
         seed=args.seed + 11,
         folds=args.folds,
         transform_relative=True,
+        weights=training_weights,
     )
 
     alpha, live_settings, live_metrics, blended_oof = sweep_blend(
@@ -387,7 +431,7 @@ def main() -> None:
         "feature_names": feature_names,
         "metadata": {
             "model_name": "poker44-innovative-dual-branch",
-            "model_version": MODEL_VERSION,
+            "model_version": model_version,
             "model_weights": [1.0],
             **live_settings,
             "score_remap": {},
@@ -399,7 +443,7 @@ def main() -> None:
         "training_samples": len(y),
         "metadata_rows": metadata,
         "benchmark_state": benchmark_state,
-        "model_version": MODEL_VERSION,
+        "model_version": model_version,
     }
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -427,7 +471,7 @@ def main() -> None:
 
     if args.deploy and new_reward >= baseline_reward - 0.005:
         backup_path = args.deploy_path.with_name(
-            f"{args.deploy_path.stem}.{MODEL_VERSION}_backup.joblib"
+            f"{args.deploy_path.stem}.{model_version}_backup.joblib"
         )
         if args.deploy_path.exists():
             joblib.dump(joblib.load(args.deploy_path), backup_path)

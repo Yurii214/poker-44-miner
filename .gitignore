@@ -26,6 +26,11 @@ model/*
 models/*
 !models/bot_detector_v1.joblib
 !models/model_manifest.json
+models/live_chunks/
+models/benchmark_state.json
+models/live_chunk_retrain_cursor.json
+models/auto_retrain.log
+models/top3_pipeline.log
 runs/*
 # C extensions
 *.so

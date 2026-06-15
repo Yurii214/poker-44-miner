@@ -16,6 +16,7 @@ from poker44.utils.model_manifest import (
 )
 from poker44.validator.synapse import DetectionSynapse
 from poker44_ml.inference import DEFAULT_MODEL_PATH, Poker44Model
+from poker44_ml.live_chunk_store import is_logging_enabled, log_validator_batch
 
 DEFAULT_MAX_POSITIVE_RATE = 0.10
 SCORE_CAP_EPSILON = 1e-6
@@ -187,6 +188,23 @@ class Miner(BaseMinerNeuron):
             )
         bt.logging.info(f"Miner predictions: {synapse.predictions}")
         bt.logging.info(f"Scored {len(chunks)} chunks with ML bot-risk scores.")
+        if is_logging_enabled():
+            validator_hotkey = None
+            dendrite = getattr(synapse, "dendrite", None)
+            if dendrite is not None:
+                validator_hotkey = getattr(dendrite, "hotkey", None)
+            logged = log_validator_batch(
+                chunks=chunks,
+                raw_scores=components.get("raw_scores"),
+                final_scores=scores,
+                validator_hotkey=validator_hotkey,
+                uid=getattr(self, "uid", None),
+            )
+            if logged:
+                bt.logging.debug(
+                    f"Logged live validator batch | chunks={len(chunks)} "
+                    f"validator={validator_hotkey or 'unknown'}"
+                )
         return synapse
 
     async def blacklist(self, synapse: DetectionSynapse) -> Tuple[bool, str]:
