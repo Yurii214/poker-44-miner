@@ -39,7 +39,114 @@ from train_reference_stack import (  # noqa: E402
 
 DEFAULT_OUTPUT = REPO_ROOT / "models" / "bot_detector_innovative.joblib"
 DEFAULT_DEPLOY_PATH = REPO_ROOT / "models" / "bot_detector_v1.joblib"
-MODEL_VERSION = "reference-dualbranch-v3-rank"
+MODEL_VERSION = "reference-dualbranch-v4-live"
+HOLDOUT_SOURCE_DATES = 5
+
+
+def holdout_mask_from_metadata(
+    metadata: list[dict[str, Any]],
+    *,
+    holdout_dates: int = HOLDOUT_SOURCE_DATES,
+) -> np.ndarray:
+    dates = sorted({str(row["source_date"]) for row in metadata})
+    if len(dates) <= 1:
+        return np.zeros(len(metadata), dtype=bool)
+    keep = max(1, min(int(holdout_dates), len(dates) // 3 or 1))
+    holdout = set(dates[-keep:])
+    return np.asarray([str(row["source_date"]) in holdout for row in metadata], dtype=bool)
+
+
+def _simulate_live_scores(
+    scores: np.ndarray,
+    settings: dict[str, Any],
+    *,
+    max_positive_rate: float,
+) -> np.ndarray:
+    return simulate_live_miner_scores(
+        scores,
+        bias=float(settings.get("score_logit_bias", 2.2) or 2.2),
+        temperature=float(settings.get("score_logit_temperature", 0.65) or 0.65),
+        spread_blend=float(settings.get("live_batch_spread_blend", 0.70) or 0.70),
+        center_blend=float(settings.get("live_batch_center_blend", 0.0) or 0.0),
+        spread_low=settings.get("live_batch_spread_low"),
+        spread_high=settings.get("live_batch_spread_high"),
+        max_positive_rate=max_positive_rate,
+        logit_mode=str(settings.get("live_logit_mode", "adaptive") or "adaptive"),
+        target_median=float(settings.get("live_logit_target_median", 0.24) or 0.24),
+    )
+
+
+def _live_selection_tuple(
+    live_scores: np.ndarray,
+    y: np.ndarray,
+    *,
+    groups: np.ndarray,
+    holdout_mask: np.ndarray | None = None,
+) -> tuple[float, float, float, float]:
+    from train_reference_stack import _within_group_spearman
+
+    rew, meta = reward(live_scores, y)
+    holdout_rew = float(rew)
+    if holdout_mask is not None and bool(holdout_mask.any()):
+        holdout_rew, _ = reward(live_scores[holdout_mask], y[holdout_mask])
+    spearman = float(_within_group_spearman(live_scores, y, groups).get("mean", 0.0))
+    bot_recall = float(meta.get("bot_recall", 0.0) or 0.0)
+    return (
+        float(holdout_rew),
+        float(rew),
+        bot_recall,
+        spearman,
+    )
+
+
+def sweep_blend(
+    abs_oof: np.ndarray,
+    rel_oof: np.ndarray,
+    y: np.ndarray,
+    *,
+    groups: np.ndarray,
+    max_fpr: float,
+    max_positive_rate: float,
+    holdout_mask: np.ndarray | None = None,
+) -> tuple[float, dict[str, Any], dict[str, Any], np.ndarray]:
+    best_alpha = 0.75
+    best_metrics: dict[str, Any] = {}
+    best_settings: dict[str, Any] = {}
+    best_scores = abs_oof
+    best_selection = (-1.0, -1.0, -1.0, -1.0)
+
+    for alpha in np.linspace(0.15, 0.55, 9):
+        scores = alpha * abs_oof + (1.0 - alpha) * rel_oof
+        settings, metrics = select_live_calibration(
+            scores,
+            y,
+            max_fpr=max_fpr,
+            max_positive_rate=max_positive_rate,
+            groups=groups,
+        )
+        live = _simulate_live_scores(scores, settings, max_positive_rate=max_positive_rate)
+        selection = _live_selection_tuple(
+            live,
+            y,
+            groups=groups,
+            holdout_mask=holdout_mask,
+        )
+        batch_spearman = selection[3]
+        print(
+            f"alpha={alpha:.2f} holdout={selection[0]:.4f} reward={selection[1]:.4f} "
+            f"bot_recall={selection[2]:.4f} fpr={metrics.get('reward_meta', {}).get('fpr', 0.0):.4f} "
+            f"batch_spearman={batch_spearman:.4f}"
+        )
+        if selection > best_selection:
+            best_selection = selection
+            best_alpha = float(alpha)
+            best_settings = settings
+            best_metrics = metrics
+            best_metrics["batch_spearman"] = batch_spearman
+            best_metrics["holdout_reward"] = selection[0]
+            best_metrics["bot_recall"] = selection[2]
+            best_scores = scores
+    return best_alpha, best_settings, best_metrics, best_scores
 
 
 def batch_groups_from_metadata(metadata: list[dict[str, Any]]) -> np.ndarray:
@@ -86,71 +193,6 @@ def train_branch_oof(
     return final_models, np.mean(oof, axis=1)
 
 
-def sweep_blend(
-    abs_oof: np.ndarray,
-    rel_oof: np.ndarray,
-    y: np.ndarray,
-    *,
-    groups: np.ndarray,
-    max_fpr: float,
-    max_positive_rate: float,
-) -> tuple[float, dict[str, Any], dict[str, Any], np.ndarray]:
-    best_alpha = 0.75
-    best_metrics: dict[str, Any] = {}
-    best_settings: dict[str, Any] = {}
-    best_scores = abs_oof
-    best_reward = -1.0
-
-    from train_reference_stack import _within_group_spearman
-
-    for alpha in np.linspace(0.15, 0.55, 9):
-        scores = alpha * abs_oof + (1.0 - alpha) * rel_oof
-        settings, metrics = select_live_calibration(
-            scores,
-            y,
-            max_fpr=max_fpr,
-            max_positive_rate=max_positive_rate,
-            groups=groups,
-        )
-        rew = float(metrics.get("reward", 0.0) or 0.0)
-        batch_spearman = float(
-            _within_group_spearman(
-                simulate_live_miner_scores(
-                    scores,
-                    bias=float(settings.get("score_logit_bias", 2.2) or 2.2),
-                    temperature=float(settings.get("score_logit_temperature", 0.65) or 0.65),
-                    spread_blend=float(settings.get("live_batch_spread_blend", 0.70) or 0.70),
-                    center_blend=float(settings.get("live_batch_center_blend", 0.0) or 0.0),
-                    spread_low=settings.get("live_batch_spread_low"),
-                    spread_high=settings.get("live_batch_spread_high"),
-                    max_positive_rate=max_positive_rate,
-                    logit_mode=str(settings.get("live_logit_mode", "adaptive") or "adaptive"),
-                    target_median=float(settings.get("live_logit_target_median", 0.24) or 0.24),
-                ),
-                y,
-                groups,
-            ).get("mean", 0.0)
-        )
-        print(
-            f"alpha={alpha:.2f} reward={rew:.4f} "
-            f"fpr={metrics.get('reward_meta', {}).get('fpr', 0.0):.4f} "
-            f"batch_spearman={batch_spearman:.4f}"
-        )
-        selection = (batch_spearman, rew)
-        best_selection = (
-            float(best_metrics.get("batch_spearman", 0.0) or 0.0),
-            best_reward,
-        )
-        if selection > best_selection:
-            best_reward = rew
-            best_alpha = float(alpha)
-            best_settings = settings
-            best_metrics = metrics
-            best_metrics["batch_spearman"] = batch_spearman
-            best_scores = scores
-    return best_alpha, best_settings, best_metrics, best_scores
-
-
 def sweep_rank_boost(
     feature_dicts: list[dict[str, float]],
     raw_scores: np.ndarray,
@@ -159,40 +201,39 @@ def sweep_rank_boost(
     groups: np.ndarray,
     live_settings: dict[str, Any],
     max_positive_rate: float,
+    holdout_mask: np.ndarray | None = None,
 ) -> tuple[float, dict[str, Any]]:
-    from train_reference_stack import _within_group_spearman
-
     best_boost = 0.0
     best_metrics: dict[str, Any] = {}
-    best_spearman = -1.0
+    best_selection = (-1.0, -1.0, -1.0, -1.0)
 
     for boost in (0.0, 0.08, 0.12, 0.18, 0.25, 0.32):
         boosted = batch_rank_boost(feature_dicts, raw_scores.tolist(), blend=boost)
-        live = simulate_live_miner_scores(
+        live = _simulate_live_scores(
             np.asarray(boosted, dtype=float),
-            bias=float(live_settings.get("score_logit_bias", 2.2) or 2.2),
-            temperature=float(live_settings.get("score_logit_temperature", 0.65) or 0.65),
-            spread_blend=float(live_settings.get("live_batch_spread_blend", 0.70) or 0.70),
-            center_blend=float(live_settings.get("live_batch_center_blend", 0.0) or 0.0),
-            spread_low=live_settings.get("live_batch_spread_low"),
-            spread_high=live_settings.get("live_batch_spread_high"),
+            live_settings,
             max_positive_rate=max_positive_rate,
-            logit_mode=str(live_settings.get("live_logit_mode", "adaptive") or "adaptive"),
-            target_median=float(live_settings.get("live_logit_target_median", 0.24) or 0.24),
         )
-        rew, meta = reward(live, y)
-        spearman = float(_within_group_spearman(live, y, groups).get("mean", 0.0))
+        selection = _live_selection_tuple(
+            live,
+            y,
+            groups=groups,
+            holdout_mask=holdout_mask,
+        )
         print(
-            f"rank_boost={boost:.2f} reward={rew:.4f} "
-            f"fpr={meta.get('fpr', 0.0):.4f} batch_spearman={spearman:.4f}"
+            f"rank_boost={boost:.2f} holdout={selection[0]:.4f} reward={selection[1]:.4f} "
+            f"bot_recall={selection[2]:.4f} batch_spearman={selection[3]:.4f}"
         )
-        if (spearman, rew) > (best_spearman, float(best_metrics.get("reward", -1.0) or -1.0)):
+        if selection > best_selection:
             best_boost = float(boost)
-            best_spearman = spearman
+            best_selection = selection
+            _, meta = reward(live, y)
             best_metrics = {
-                "reward": float(rew),
+                "reward": selection[1],
                 "reward_meta": meta,
-                "batch_spearman": spearman,
+                "batch_spearman": selection[3],
+                "holdout_reward": selection[0],
+                "bot_recall": selection[2],
                 "score_std": float(live.std()),
                 "score_max": float(live.max()),
             }
@@ -270,9 +311,11 @@ def main() -> None:
     feature_dicts, y, metadata, benchmark_state = fetch_training_examples()
     x, feature_names = vectorize(feature_dicts)
     groups = batch_groups_from_metadata(metadata)
+    holdout_mask = holdout_mask_from_metadata(metadata)
+    holdout_count = int(holdout_mask.sum())
     print(
         f"Loaded {len(y)} samples | features={len(feature_names)} | "
-        f"groups={len(np.unique(groups))}"
+        f"groups={len(np.unique(groups))} | holdout={holdout_count}"
     )
 
     abs_models, abs_oof = train_branch_oof(
@@ -299,6 +342,7 @@ def main() -> None:
         groups=groups,
         max_fpr=args.max_fpr,
         max_positive_rate=args.max_positive_rate,
+        holdout_mask=holdout_mask,
     )
 
     rank_boost, rank_metrics = sweep_rank_boost(
@@ -308,6 +352,7 @@ def main() -> None:
         groups=groups,
         live_settings=live_settings,
         max_positive_rate=args.max_positive_rate,
+        holdout_mask=holdout_mask,
     )
     live_settings["live_batch_rank_boost"] = rank_boost
     live_metrics["rank_boost_metrics"] = rank_metrics
@@ -348,7 +393,7 @@ def main() -> None:
             "score_remap": {},
             "metrics": live_metrics,
             "diagnostics": diagnostics,
-            "training_objective": "dual_branch_absolute_relative",
+            "training_objective": "dual_branch_absolute_relative_live_holdout",
         },
         "metrics": live_metrics,
         "training_samples": len(y),

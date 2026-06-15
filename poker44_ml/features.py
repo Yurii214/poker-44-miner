@@ -301,12 +301,19 @@ def _schema_chunk_features(chunk: list[dict[str, Any]]) -> dict[str, float]:
 def chunk_features(chunk: list[dict[str, Any]]) -> dict[str, float]:
     """Merge behavioral + signature features with schema-stable chunk features."""
     from poker44.ml.features import extract_chunk_features
+    from poker44.validator.payload_view import prepare_hand_for_miner
 
     if not chunk:
         return {"hand_count": 0.0}
 
-    behavioral = extract_chunk_features(chunk)
-    schema = _schema_chunk_features(chunk)
+    prepared = [
+        prepare_hand_for_miner(hand) for hand in chunk if isinstance(hand, dict)
+    ]
+    if not prepared:
+        return {"hand_count": 0.0}
+
+    behavioral = extract_chunk_features(prepared, already_visible=True)
+    schema = _schema_chunk_features(prepared)
     behavioral.update(
         {name: value for name, value in schema.items() if name != "hand_count"}
     )

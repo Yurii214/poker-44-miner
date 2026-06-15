@@ -48,7 +48,7 @@ warnings.filterwarnings(
 API_BASE = "https://api.poker44.net/api/v1/benchmark"
 DEFAULT_OUTPUT = REPO_ROOT / "models" / "bot_detector_reference_stack.joblib"
 DEFAULT_STATE_PATH = REPO_ROOT / "models" / "benchmark_state.json"
-HUMAN_SAMPLE_WEIGHT = 2.0
+HUMAN_SAMPLE_WEIGHT = 1.75
 
 
 def _get_json(url: str) -> dict[str, Any]:
@@ -87,9 +87,7 @@ def fetch_training_examples() -> tuple[list[dict[str, float]], np.ndarray, list[
                 if index >= len(ground_truth):
                     continue
                 visible_chunk = [
-                    prepare_hand_for_miner(hand)
-                    for hand in inner_chunk
-                    if isinstance(hand, dict)
+                    hand for hand in inner_chunk if isinstance(hand, dict)
                 ]
                 features = chunk_features(visible_chunk)
                 features["hand_count"] = float(len(visible_chunk))
