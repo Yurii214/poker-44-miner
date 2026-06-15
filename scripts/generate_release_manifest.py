@@ -7,6 +7,8 @@ import json
 import sys
 from pathlib import Path
 
+import joblib
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -27,6 +29,21 @@ def main() -> int:
     ]
     artifact_rel = "models/bot_detector_v1.joblib"
     artifact_path = ROOT / artifact_rel
+    model_name = "poker44-innovative-dual-branch"
+    model_version = "reference-dualbranch-v4-live"
+    if artifact_path.is_file():
+        artifact = joblib.load(artifact_path)
+        metadata = dict(artifact.get("metadata") or {})
+        model_name = str(
+            metadata.get("model_name")
+            or artifact.get("model_name")
+            or model_name
+        )
+        model_version = str(
+            artifact.get("model_version")
+            or metadata.get("model_version")
+            or model_version
+        )
     data_statement = (
         "Trained on public Poker44 benchmark releases fetched from "
         "https://api.poker44.net/api/v1/benchmark using miner-visible hand payloads."
@@ -35,8 +52,8 @@ def main() -> int:
         repo_root=ROOT,
         implementation_files=implementation_files,
         defaults={
-            "model_name": "poker44-innovative-dual-branch",
-            "model_version": "reference-dualbranch-v2",
+            "model_name": model_name,
+            "model_version": model_version,
             "framework": "lightgbm-xgboost-batch-rank-stack-quantile-remap",
             "license": "MIT",
             "repo_url": repo_url,

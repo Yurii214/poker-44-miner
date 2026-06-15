@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import threading
+from queue import Full, Queue
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,8 @@ from poker44.ml.features import payload_chunk_signature
 
 DEFAULT_STORE_DIR = Path(__file__).resolve().parents[1] / "models" / "live_chunks"
 _LOCK = threading.Lock()
+_QUEUE: Queue[tuple[Path, dict[str, Any]]] = Queue(maxsize=64)
+_WORKER_STARTED = False
 
 
 def _utc_now() -> str:
@@ -69,6 +72,68 @@ def is_logging_enabled() -> bool:
     return value not in {"0", "false", "no", "off"}
 
 
+def _write_batch(store: Path, payload: dict[str, Any]) -> None:
+    store.mkdir(parents=True, exist_ok=True)
+    (store / "chunks").mkdir(parents=True, exist_ok=True)
+
+    chunks = payload.get("chunks") or []
+    raw_scores = payload.get("raw_scores") or []
+    final_scores = payload.get("final_scores") or []
+    signatures = [_chunk_signature(chunk) for chunk in chunks]
+    record = {
+        "ts": _utc_now(),
+        "uid": payload.get("uid"),
+        "validator_hotkey": payload.get("validator_hotkey"),
+        "chunk_count": len(chunks),
+        "hand_counts": [len(chunk) for chunk in chunks],
+        "chunk_signatures": signatures,
+        "raw_scores": [round(float(v), 6) for v in raw_scores[: len(chunks)]],
+        "final_scores": [round(float(v), 6) for v in final_scores[: len(chunks)]],
+        "chunks": chunks,
+    }
+
+    with _LOCK:
+        manifest = _load_manifest(store)
+        seen: dict[str, int] = dict(manifest.get("seen_signatures") or {})
+        novel = 0
+        for signature in signatures:
+            if signature not in seen:
+                novel += 1
+            seen[signature] = int(seen.get(signature, 0)) + 1
+        manifest["seen_signatures"] = seen
+        manifest["unique_signatures"] = len(seen)
+        manifest["total_batches"] = int(manifest.get("total_batches", 0)) + 1
+        manifest["total_chunks"] = int(manifest.get("total_chunks", 0)) + len(chunks)
+        manifest["last_batch_at"] = record["ts"]
+        manifest["last_novel_signatures"] = novel
+
+        line = json.dumps(record, separators=(",", ":"), ensure_ascii=True)
+        with gzip.open(_day_path(store), "at", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+        _save_manifest(store, manifest)
+
+
+def _writer_loop() -> None:
+    while True:
+        store, payload = _QUEUE.get()
+        try:
+            _write_batch(store, payload)
+        finally:
+            _QUEUE.task_done()
+
+
+def _ensure_worker() -> None:
+    global _WORKER_STARTED
+    if _WORKER_STARTED:
+        return
+    with _LOCK:
+        if _WORKER_STARTED:
+            return
+        worker = threading.Thread(target=_writer_loop, daemon=True, name="poker44-live-chunk-writer")
+        worker.start()
+        _WORKER_STARTED = True
+
+
 def log_validator_batch(
     *,
     chunks: list[list[dict[str, Any]]],
@@ -84,8 +149,6 @@ def log_validator_batch(
         return False
 
     store = Path(store_dir or os.getenv("POKER44_LIVE_CHUNK_DIR", DEFAULT_STORE_DIR))
-    store.mkdir(parents=True, exist_ok=True)
-    (store / "chunks").mkdir(parents=True, exist_ok=True)
 
     limit = int(
         max_chunks_per_batch
@@ -93,39 +156,18 @@ def log_validator_batch(
         or 80
     )
     trimmed = chunks[: max(1, limit)]
-
-    signatures = [_chunk_signature(chunk) for chunk in trimmed]
-    record = {
-        "ts": _utc_now(),
+    payload = {
         "uid": uid,
         "validator_hotkey": validator_hotkey,
-        "chunk_count": len(trimmed),
-        "hand_counts": [len(chunk) for chunk in trimmed],
-        "chunk_signatures": signatures,
-        "raw_scores": [round(float(v), 6) for v in (raw_scores or [])[: len(trimmed)]],
-        "final_scores": [round(float(v), 6) for v in (final_scores or [])[: len(trimmed)]],
+        "raw_scores": list(raw_scores or []),
+        "final_scores": list(final_scores or []),
         "chunks": trimmed,
     }
-
-    with _LOCK:
-        manifest = _load_manifest(store)
-        seen: dict[str, int] = dict(manifest.get("seen_signatures") or {})
-        novel = 0
-        for signature in signatures:
-            if signature not in seen:
-                novel += 1
-            seen[signature] = int(seen.get(signature, 0)) + 1
-        manifest["seen_signatures"] = seen
-        manifest["unique_signatures"] = len(seen)
-        manifest["total_batches"] = int(manifest.get("total_batches", 0)) + 1
-        manifest["total_chunks"] = int(manifest.get("total_chunks", 0)) + len(trimmed)
-        manifest["last_batch_at"] = record["ts"]
-        manifest["last_novel_signatures"] = novel
-
-        line = json.dumps(record, separators=(",", ":"), ensure_ascii=True)
-        with gzip.open(_day_path(store), "at", encoding="utf-8") as handle:
-            handle.write(line + "\n")
-        _save_manifest(store, manifest)
+    _ensure_worker()
+    try:
+        _QUEUE.put_nowait((store, payload))
+    except Full:
+        return False
     return True
 
 

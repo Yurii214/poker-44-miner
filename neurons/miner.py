@@ -35,6 +35,14 @@ class Miner(BaseMinerNeuron):
             model_path = repo_root / model_path
 
         self.detector = Poker44Model(model_path=model_path)
+        self.enable_debug_components = os.getenv(
+            "POKER44_MINER_DEBUG_COMPONENTS",
+            "0",
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self.log_score_distribution = os.getenv(
+            "POKER44_LOG_SCORE_DISTRIBUTION",
+            "0",
+        ).strip().lower() in {"1", "true", "yes", "on"}
         self.max_positive_rate = float(
             self.detector.metadata.get("live_max_positive_rate", DEFAULT_MAX_POSITIVE_RATE)
             or DEFAULT_MAX_POSITIVE_RATE
@@ -158,13 +166,17 @@ class Miner(BaseMinerNeuron):
 
     async def forward(self, synapse: DetectionSynapse) -> DetectionSynapse:
         chunks = synapse.chunks or []
-        components = self.detector.debug_score_components(chunks)
-        raw_scores = components.get("final_scores") or self.detector.predict_chunk_scores(chunks)
+        components: dict[str, list[float]] = {}
+        if self.enable_debug_components:
+            components = self.detector.debug_score_components(chunks)
+            raw_scores = components.get("final_scores") or self.detector.predict_chunk_scores(chunks)
+        else:
+            raw_scores = self.detector.predict_chunk_scores(chunks)
         scores = self._apply_live_positive_cap(raw_scores)
         synapse.risk_scores = scores
         synapse.predictions = [score >= 0.5 for score in scores]
         synapse.model_manifest = dict(self.model_manifest)
-        if scores:
+        if scores and self.log_score_distribution:
             sorted_scores = sorted(scores, reverse=True)
             mean_score = sum(scores) / len(scores)
             top_scores = ", ".join(f"{score:.6f}" for score in sorted_scores[:5])
