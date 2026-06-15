@@ -12,6 +12,11 @@ COMMIT_PIN_FILE="${POKER44_REPO_COMMIT_FILE:-/root/bittensor-mining/.poker44_rep
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "${ROOT}"
 
+TOKEN_FILE="${POKER44_GITHUB_TOKEN_FILE:-/root/bittensor-mining/.poker44_github_token}"
+if [[ -z "${GITHUB_TOKEN:-}" && -f "${TOKEN_FILE}" ]]; then
+  export GITHUB_TOKEN="$(tr -d '[:space:]' < "${TOKEN_FILE}")"
+fi
+
 register_deploy_key() {
   if [[ -z "${GITHUB_TOKEN:-}" ]]; then
     return 1

@@ -26,6 +26,7 @@ from poker44_ml.innovative_model import (
     DualBranchBatchAwareModel,
     transform_batch_relative_rows,
 )
+from poker44_ml.rank_stack import batch_rank_boost
 from train_reference_stack import (  # noqa: E402
     DEFAULT_STATE_PATH,
     fetch_training_examples,
@@ -38,7 +39,7 @@ from train_reference_stack import (  # noqa: E402
 
 DEFAULT_OUTPUT = REPO_ROOT / "models" / "bot_detector_innovative.joblib"
 DEFAULT_DEPLOY_PATH = REPO_ROOT / "models" / "bot_detector_v1.joblib"
-MODEL_VERSION = "reference-dualbranch-v2"
+MODEL_VERSION = "reference-dualbranch-v3-rank"
 
 
 def batch_groups_from_metadata(metadata: list[dict[str, Any]]) -> np.ndarray:
@@ -102,7 +103,7 @@ def sweep_blend(
 
     from train_reference_stack import _within_group_spearman
 
-    for alpha in np.linspace(0.35, 0.75, 9):
+    for alpha in np.linspace(0.15, 0.55, 9):
         scores = alpha * abs_oof + (1.0 - alpha) * rel_oof
         settings, metrics = select_live_calibration(
             scores,
@@ -135,10 +136,10 @@ def sweep_blend(
             f"fpr={metrics.get('reward_meta', {}).get('fpr', 0.0):.4f} "
             f"batch_spearman={batch_spearman:.4f}"
         )
-        selection = (rew, batch_spearman)
+        selection = (batch_spearman, rew)
         best_selection = (
-            best_reward,
             float(best_metrics.get("batch_spearman", 0.0) or 0.0),
+            best_reward,
         )
         if selection > best_selection:
             best_reward = rew
@@ -148,6 +149,54 @@ def sweep_blend(
             best_metrics["batch_spearman"] = batch_spearman
             best_scores = scores
     return best_alpha, best_settings, best_metrics, best_scores
+
+
+def sweep_rank_boost(
+    feature_dicts: list[dict[str, float]],
+    raw_scores: np.ndarray,
+    y: np.ndarray,
+    *,
+    groups: np.ndarray,
+    live_settings: dict[str, Any],
+    max_positive_rate: float,
+) -> tuple[float, dict[str, Any]]:
+    from train_reference_stack import _within_group_spearman
+
+    best_boost = 0.0
+    best_metrics: dict[str, Any] = {}
+    best_spearman = -1.0
+
+    for boost in (0.0, 0.08, 0.12, 0.18, 0.25, 0.32):
+        boosted = batch_rank_boost(feature_dicts, raw_scores.tolist(), blend=boost)
+        live = simulate_live_miner_scores(
+            np.asarray(boosted, dtype=float),
+            bias=float(live_settings.get("score_logit_bias", 2.2) or 2.2),
+            temperature=float(live_settings.get("score_logit_temperature", 0.65) or 0.65),
+            spread_blend=float(live_settings.get("live_batch_spread_blend", 0.70) or 0.70),
+            center_blend=float(live_settings.get("live_batch_center_blend", 0.0) or 0.0),
+            spread_low=live_settings.get("live_batch_spread_low"),
+            spread_high=live_settings.get("live_batch_spread_high"),
+            max_positive_rate=max_positive_rate,
+            logit_mode=str(live_settings.get("live_logit_mode", "adaptive") or "adaptive"),
+            target_median=float(live_settings.get("live_logit_target_median", 0.24) or 0.24),
+        )
+        rew, meta = reward(live, y)
+        spearman = float(_within_group_spearman(live, y, groups).get("mean", 0.0))
+        print(
+            f"rank_boost={boost:.2f} reward={rew:.4f} "
+            f"fpr={meta.get('fpr', 0.0):.4f} batch_spearman={spearman:.4f}"
+        )
+        if (spearman, rew) > (best_spearman, float(best_metrics.get("reward", -1.0) or -1.0)):
+            best_boost = float(boost)
+            best_spearman = spearman
+            best_metrics = {
+                "reward": float(rew),
+                "reward_meta": meta,
+                "batch_spearman": spearman,
+                "score_std": float(live.std()),
+                "score_max": float(live.max()),
+            }
+    return best_boost, best_metrics
 
 
 def evaluate_artifact_reward(
@@ -165,12 +214,14 @@ def evaluate_artifact_reward(
     )
     if groups is None:
         groups = np.zeros(len(x), dtype=int)
+    md = artifact.get("metadata") or {}
+    boost = float(md.get("live_batch_rank_boost", 0.0) or 0.0)
     raw = np.zeros(len(x), dtype=float)
     for group_id in np.unique(groups):
         mask = groups == group_id
         batch_x = x[mask]
+        batch_features = [feature_dicts[int(idx)] for idx in np.where(mask)[0]]
         if hasattr(model, "predict_chunk_scores"):
-            chunk_rows = [dict(zip(feature_names, row)) for row in batch_x]
             raw[mask] = np.asarray(
                 model.predict_chunk_scores(
                     [[] for _ in range(int(mask.sum()))],
@@ -180,7 +231,13 @@ def evaluate_artifact_reward(
             )
         else:
             raw[mask] = np.asarray(model.predict_proba(batch_x))[:, 1]
-    md = artifact.get("metadata") or {}
+        if boost > 0.0:
+            boosted = batch_rank_boost(
+                batch_features,
+                raw[mask].tolist(),
+                blend=boost,
+            )
+            raw[mask] = np.asarray(boosted, dtype=float)
     live = simulate_live_miner_scores(
         raw,
         bias=float(md.get("score_logit_bias", 2.2) or 2.2),
@@ -242,6 +299,21 @@ def main() -> None:
         groups=groups,
         max_fpr=args.max_fpr,
         max_positive_rate=args.max_positive_rate,
+    )
+
+    rank_boost, rank_metrics = sweep_rank_boost(
+        feature_dicts,
+        blended_oof,
+        y,
+        groups=groups,
+        live_settings=live_settings,
+        max_positive_rate=args.max_positive_rate,
+    )
+    live_settings["live_batch_rank_boost"] = rank_boost
+    live_metrics["rank_boost_metrics"] = rank_metrics
+    live_metrics["batch_spearman"] = max(
+        float(live_metrics.get("batch_spearman", 0.0) or 0.0),
+        float(rank_metrics.get("batch_spearman", 0.0) or 0.0),
     )
 
     dual_model = DualBranchBatchAwareModel(

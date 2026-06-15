@@ -306,6 +306,7 @@ def select_live_calibration(
         (0.12, 0.40),
         (0.10, 0.38),
         (0.15, 0.42),
+        (0.18, 0.48),
     )
     best: tuple[tuple[float, float, float, float], dict[str, Any], np.ndarray] | None = None
     fallback: tuple[tuple[float, float, float, float], dict[str, Any], np.ndarray] | None = None
@@ -337,8 +338,8 @@ def select_live_calibration(
                             )
                         )
                     candidate = (
+                        float(batch_spearman),
                         float(rew),
-                        batch_spearman,
                         float(average_precision_score(labels, live_scores)),
                         -float(meta.get("fpr", 1.0)),
                     )
