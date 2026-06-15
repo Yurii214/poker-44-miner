@@ -21,7 +21,7 @@
   "notes": "Dual-branch benchmark stack with bounded live calibration.",
   "open_source": true,
   "private_data_attestation": "This miner does not train on validator-only live evaluation labels.",
-  "repo_commit": "206847f0d61f226aeeb0c0ec47055deba988cba2",
+  "repo_commit": "1a7f25463748bac6a096706c81f22a4806a06153",
   "repo_url": "https://github.com/Yurii214/poker-44-miner",
   "schema_version": "1",
   "training_data_sources": [
