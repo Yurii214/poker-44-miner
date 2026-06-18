@@ -131,16 +131,16 @@ def make_base_models(seed: int) -> list[tuple[str, Any]]:
         (
             "lgb",
             lgb.LGBMClassifier(
-                n_estimators=650,
-                learning_rate=0.025,
-                num_leaves=23,
-                max_depth=6,
-                min_child_samples=12,
-                feature_fraction=0.75,
-                bagging_fraction=0.88,
+                n_estimators=900,
+                learning_rate=0.018,
+                num_leaves=31,
+                max_depth=7,
+                min_child_samples=10,
+                feature_fraction=0.72,
+                bagging_fraction=0.85,
                 bagging_freq=1,
-                reg_alpha=0.75,
-                reg_lambda=1.5,
+                reg_alpha=0.5,
+                reg_lambda=1.2,
                 class_weight="balanced",
                 random_state=seed,
                 verbose=-1,
@@ -148,16 +148,34 @@ def make_base_models(seed: int) -> list[tuple[str, Any]]:
             ),
         ),
         (
+            "lgb_rank",
+            lgb.LGBMRanker(
+                n_estimators=600,
+                learning_rate=0.022,
+                num_leaves=23,
+                max_depth=6,
+                min_child_samples=8,
+                feature_fraction=0.70,
+                bagging_fraction=0.85,
+                bagging_freq=1,
+                reg_alpha=0.4,
+                reg_lambda=1.0,
+                random_state=seed + 2,
+                verbose=-1,
+                n_jobs=-1,
+            ),
+        ),
+        (
             "xgb",
             xgb.XGBClassifier(
-                n_estimators=500,
-                learning_rate=0.03,
-                max_depth=4,
-                min_child_weight=5,
-                subsample=0.85,
-                colsample_bytree=0.8,
-                reg_alpha=0.75,
-                reg_lambda=2.0,
+                n_estimators=600,
+                learning_rate=0.025,
+                max_depth=5,
+                min_child_weight=4,
+                subsample=0.82,
+                colsample_bytree=0.75,
+                reg_alpha=0.5,
+                reg_lambda=1.8,
                 eval_metric="aucpr",
                 random_state=seed + 1,
                 n_jobs=-1,
@@ -167,6 +185,14 @@ def make_base_models(seed: int) -> list[tuple[str, Any]]:
 
 
 def fit_model(model: Any, x: np.ndarray, y: np.ndarray, weights: np.ndarray) -> Any:
+    import lightgbm as lgb
+    if isinstance(model, lgb.LGBMRanker):
+        # LGBMRanker needs group sizes (one group per sample for pairwise ranking)
+        group = np.ones(len(y), dtype=int)
+        try:
+            return model.fit(x, y, group=group, sample_weight=weights)
+        except TypeError:
+            return model.fit(x, y, group=group)
     try:
         return model.fit(x, y, sample_weight=weights)
     except TypeError:
@@ -174,6 +200,15 @@ def fit_model(model: Any, x: np.ndarray, y: np.ndarray, weights: np.ndarray) -> 
 
 
 def base_predict(model: Any, x: np.ndarray) -> np.ndarray:
+    import lightgbm as lgb
+    if isinstance(model, lgb.LGBMRanker):
+        raw = np.asarray(model.predict(x), dtype=float)
+        # convert ranking scores to [0,1] via sigmoid-like normalization
+        raw = raw - raw.min()
+        rng = raw.max()
+        if rng > 1e-9:
+            raw = raw / rng
+        return np.clip(raw, 0.0, 1.0)
     proba = np.asarray(model.predict_proba(x))
     return np.clip(proba[:, 1] if proba.ndim == 2 else proba, 0.0, 1.0)
 

@@ -154,7 +154,15 @@ class Poker44Model:
                 decisions = model.decision_function(rows)
                 per_model.append([self._sigmoid(value) for value in decisions])
             else:
-                per_model.append([self._clamp01(value) for value in model.predict(rows)])
+                raw_vals = list(model.predict(rows))
+                # LGBMRanker produces unbounded ranking scores — normalise per batch
+                raw_arr = [float(v) for v in raw_vals]
+                lo = min(raw_arr)
+                hi = max(raw_arr)
+                rng = hi - lo
+                if rng > 1e-9:
+                    raw_arr = [(v - lo) / rng for v in raw_arr]
+                per_model.append([self._clamp01(v) for v in raw_arr])
 
         weights = [max(0.0, float(value)) for value in self.model_weights[: len(per_model)]]
         if len(weights) != len(per_model) or sum(weights) <= 0.0:

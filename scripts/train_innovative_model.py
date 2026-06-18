@@ -43,7 +43,7 @@ from train_reference_stack import (  # noqa: E402
 
 DEFAULT_OUTPUT = REPO_ROOT / "models" / "bot_detector_innovative.joblib"
 DEFAULT_DEPLOY_PATH = REPO_ROOT / "models" / "bot_detector_v1.joblib"
-MODEL_VERSION = "reference-dualbranch-v4-live"
+MODEL_VERSION = "reference-dualbranch-v5-rank"
 HOLDOUT_SOURCE_DATES = 5
 
 
@@ -160,6 +160,14 @@ def batch_groups_from_metadata(metadata: list[dict[str, Any]]) -> np.ndarray:
 
 
 def _predict_pos(model: Any, x: np.ndarray) -> np.ndarray:
+    import lightgbm as lgb
+    if isinstance(model, lgb.LGBMRanker):
+        raw = np.asarray(model.predict(x), dtype=float)
+        raw = raw - raw.min()
+        rng = raw.max()
+        if rng > 1e-9:
+            raw = raw / rng
+        return np.clip(raw, 0.0, 1.0)
     proba = np.asarray(model.predict_proba(x), dtype=float)
     return np.clip(proba[:, 1] if proba.ndim == 2 else proba, 0.0, 1.0)
 
@@ -307,8 +315,8 @@ def main() -> None:
     parser.add_argument("--deploy-path", type=Path, default=DEFAULT_DEPLOY_PATH)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--folds", type=int, default=5)
-    parser.add_argument("--max-fpr", type=float, default=0.04)
-    parser.add_argument("--max-positive-rate", type=float, default=0.10)
+    parser.add_argument("--max-fpr", type=float, default=0.02)
+    parser.add_argument("--max-positive-rate", type=float, default=0.08)
     parser.add_argument("--deploy", action="store_true")
     parser.add_argument("--live-augment", action="store_true")
     parser.add_argument(
@@ -316,8 +324,8 @@ def main() -> None:
         type=Path,
         default=REPO_ROOT / "models" / "live_chunks",
     )
-    parser.add_argument("--pseudo-weight", type=float, default=0.35)
-    parser.add_argument("--pseudo-max-examples", type=int, default=400)
+    parser.add_argument("--pseudo-weight", type=float, default=0.45)
+    parser.add_argument("--pseudo-max-examples", type=int, default=800)
     args = parser.parse_args()
 
     model_version = MODEL_VERSION
