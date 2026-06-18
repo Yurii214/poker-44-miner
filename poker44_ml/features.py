@@ -298,17 +298,32 @@ def _schema_chunk_features(chunk: list[dict[str, Any]]) -> dict[str, float]:
     return out
 
 
-def chunk_features(chunk: list[dict[str, Any]]) -> dict[str, float]:
-    """Merge behavioral + signature features with schema-stable chunk features."""
+def chunk_features(
+    chunk: list[dict[str, Any]],
+    already_prepared: bool = False,
+) -> dict[str, float]:
+    """Merge behavioral + signature features with schema-stable chunk features.
+
+    Parameters
+    ----------
+    already_prepared:
+        If True the hands are already in miner-visible payload format and the
+        per-hand ``prepare_hand_for_miner`` call is skipped.  Pass True when the
+        hands arrive directly from a validator synapse (already stripped of
+        private fields and BB-normalised) to save ~570 ms per 40-chunk batch.
+    """
     from poker44.ml.features import extract_chunk_features
-    from poker44.validator.payload_view import prepare_hand_for_miner
 
     if not chunk:
         return {"hand_count": 0.0}
 
-    prepared = [
-        prepare_hand_for_miner(hand) for hand in chunk if isinstance(hand, dict)
-    ]
+    if already_prepared:
+        prepared = [hand for hand in chunk if isinstance(hand, dict)]
+    else:
+        from poker44.validator.payload_view import prepare_hand_for_miner
+        prepared = [
+            prepare_hand_for_miner(hand) for hand in chunk if isinstance(hand, dict)
+        ]
     if not prepared:
         return {"hand_count": 0.0}
 

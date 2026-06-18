@@ -12,7 +12,7 @@
     "poker44_ml/rank_stack.py",
     "poker44_ml/calibration.py"
   ],
-  "implementation_sha256": "58d441f5c901d43e5d68491ea83749d382f618b7c621de1a2acafdb6e9bbe37f",
+  "implementation_sha256": "730e172338149d2d057b622cb3b3b34a42823d77a0f14777d9c79164641afd79",
   "inference_mode": "remote",
   "license": "MIT",
   "model_card_url": "https://github.com/Yurii214/poker-44-miner/blob/main/README.md",
@@ -21,7 +21,7 @@
   "notes": "Dual-branch benchmark stack with bounded live calibration.",
   "open_source": true,
   "private_data_attestation": "This miner does not train on validator-only live evaluation labels.",
-  "repo_commit": "f03d2f2668f19e91f3cb8980bb9363ee5348c38b",
+  "repo_commit": "27c7e1ad44bb2ca9d11f1ca5ec5205b7cc9b26a7",
   "repo_url": "https://github.com/Yurii214/poker-44-miner",
   "schema_version": "1",
   "training_data_sources": [

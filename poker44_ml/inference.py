@@ -122,14 +122,28 @@ class Poker44Model:
         value = max(-40.0, min(40.0, float(value)))
         return 1.0 / (1.0 + math.exp(-value))
 
-    def _aligned_rows(self, chunks: list[list[dict[str, Any]]]) -> list[list[float]]:
-        rows: list[list[float]] = []
+    def _extract_features(
+        self,
+        chunks: list[list[dict[str, Any]]],
+        already_prepared: bool = False,
+    ) -> tuple[list[list[float]], list[dict[str, float]]]:
+        """Extract features once and return both aligned rows and raw dicts."""
+        feature_dicts: list[dict[str, float]] = []
         for chunk in chunks:
-            features = chunk_features(chunk)
-            features["hand_count"] = float(len(chunk))
-            if not self.feature_names:
-                self.feature_names = sorted(features)
-            rows.append([float(features.get(name, 0.0)) for name in self.feature_names])
+            fd = chunk_features(chunk, already_prepared=already_prepared)
+            fd["hand_count"] = float(len(chunk))
+            feature_dicts.append(fd)
+        if not self.feature_names:
+            all_names: set[str] = set()
+            for fd in feature_dicts:
+                all_names.update(fd)
+            self.feature_names = sorted(all_names)
+        names = self.feature_names
+        rows = [[float(fd.get(name, 0.0)) for name in names] for fd in feature_dicts]
+        return rows, feature_dicts
+
+    def _aligned_rows(self, chunks: list[list[dict[str, Any]]]) -> list[list[float]]:
+        rows, _ = self._extract_features(chunks)
         return rows
 
     def _raw_model_scores(
@@ -250,18 +264,13 @@ class Poker44Model:
         return [self._clamp01(float(value)) for value in calibrated]
 
     def _feature_dicts(self, chunks: list[list[dict[str, Any]]]) -> list[dict[str, float]]:
-        feature_rows: list[dict[str, float]] = []
-        for chunk in chunks:
-            features = chunk_features(chunk)
-            features["hand_count"] = float(len(chunk))
-            feature_rows.append(features)
-        return feature_rows
+        _, feature_dicts = self._extract_features(chunks)
+        return feature_dicts
 
     def predict_chunk_scores(self, chunks: list[list[dict[str, Any]]]) -> list[float]:
         if not chunks:
             return []
-        rows = self._aligned_rows(chunks)
-        feature_rows = self._feature_dicts(chunks)
+        rows, feature_rows = self._extract_features(chunks)
         raw_scores = self._raw_model_scores(rows, chunks=chunks)
         if self.live_batch_rank_boost > 0.0:
             raw_scores = batch_rank_boost(
@@ -291,8 +300,7 @@ class Poker44Model:
     ) -> dict[str, list[float]]:
         if not chunks:
             return {}
-        rows = self._aligned_rows(chunks)
-        feature_rows = self._feature_dicts(chunks)
+        rows, feature_rows = self._extract_features(chunks)
         raw_scores = self._raw_model_scores(rows, chunks=chunks)
         if self.live_batch_rank_boost > 0.0:
             raw_scores = batch_rank_boost(

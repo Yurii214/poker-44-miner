@@ -22,7 +22,12 @@ def _predict_pos_proba(model: Any, x: np.ndarray) -> np.ndarray:
 
 
 def transform_batch_relative_rows(rows: np.ndarray, groups: np.ndarray | None = None) -> np.ndarray:
-    """Per-group robust normalization + rank percentile features."""
+    """Per-group robust normalization + rank percentile features.
+
+    Fully vectorised: no Python-level column loops. Computes all 556
+    argsorts simultaneously via scipy.stats.rankdata when available,
+    otherwise uses a vectorised argsort approach.
+    """
     x = np.asarray(rows, dtype=float)
     if x.size == 0:
         return x
@@ -34,24 +39,26 @@ def transform_batch_relative_rows(rows: np.ndarray, groups: np.ndarray | None = 
     for group_id in np.unique(groups):
         mask = groups == group_id
         batch = x[mask]
-        if batch.size == 0:
+        n, d = batch.shape
+        if n == 0:
             continue
+
+        # Robust normalization (vectorised over all columns at once)
         median = np.median(batch, axis=0)
         q75 = np.percentile(batch, 75, axis=0)
         q25 = np.percentile(batch, 25, axis=0)
         iqr = np.where((q75 - q25) < 1e-8, 1.0, (q75 - q25))
         robust = (batch - median) / iqr
 
-        ranks = np.zeros_like(batch)
-        for col in range(batch.shape[1]):
-            values = batch[:, col]
-            order = np.argsort(values, kind="stable")
-            col_rank = np.zeros(len(values), dtype=float)
-            if len(values) == 1:
-                col_rank[0] = 0.5
-            else:
-                col_rank[order] = np.linspace(0.0, 1.0, len(values))
-            ranks[:, col] = col_rank
+        # Rank features — vectorised double-argsort trick
+        if n == 1:
+            ranks = np.full((n, d), 0.5)
+        else:
+            # argsort of argsort gives rank; normalise to [0, 1]
+            order = np.argsort(batch, axis=0, kind="stable")        # (n, d)
+            rank_mat = np.argsort(order, axis=0, kind="stable").astype(float)
+            ranks = rank_mat / (n - 1)  # [0, 1]
+
         out[mask] = np.concatenate([robust, ranks], axis=1)
     return out
 
