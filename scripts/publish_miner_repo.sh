@@ -11,6 +11,7 @@ COMMIT_PIN_FILE="${POKER44_REPO_COMMIT_FILE:-/root/bittensor-mining/.poker44_rep
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "${ROOT}"
+PYTHON="${ROOT}/miner_env/bin/python"
 
 TOKEN_FILE="${POKER44_GITHUB_TOKEN_FILE:-/root/bittensor-mining/.poker44_github_token}"
 if [[ -z "${GITHUB_TOKEN:-}" && -f "${TOKEN_FILE}" ]]; then
@@ -73,7 +74,7 @@ fi
 
 configure_remote
 
-python3 scripts/generate_release_manifest.py
+"${PYTHON}" scripts/generate_release_manifest.py
 chmod +x verify.py recompute_hash.py scripts/generate_release_manifest.py
 
 git add \
@@ -89,6 +90,9 @@ git add \
   scripts/patch_live_calibration.py \
   scripts/train_innovative_model.py \
   scripts/train_reference_stack.py \
+  scripts/train_v6_rank_first.sh \
+  scripts/auto_retrain_sn126.sh \
+  scripts/monitor_uid164_dashboard.py \
   scripts/monitor_leaderboard_retune.py \
   scripts/publish_miner_repo.sh \
   .gitignore
@@ -102,7 +106,7 @@ EOF
 )"
 fi
 
-python3 recompute_hash.py
+"${PYTHON}" recompute_hash.py
 git add models/model_manifest.json
 if ! git diff --cached --quiet; then
   git commit -m "$(cat <<'EOF'
@@ -111,7 +115,7 @@ EOF
 )"
 fi
 
-python3 recompute_hash.py
+"${PYTHON}" recompute_hash.py
 git add models/model_manifest.json
 if ! git diff --cached --quiet; then
   git commit -m "$(cat <<'EOF'
@@ -128,7 +132,7 @@ git remote set-url "${REMOTE_NAME}" "${REPO_URL}.git"
 printf '%s\n' "${COMMIT}" > "${COMMIT_PIN_FILE}"
 
 if [[ -f "${START_SCRIPT}" ]]; then
-  python3 - <<PY
+  "${PYTHON}" - <<PY
 from pathlib import Path
 import re
 
@@ -155,9 +159,9 @@ if command -v pm2 >/dev/null 2>&1; then
   pm2 restart sn126-miner --update-env || true
 fi
 
-python3 verify.py
+"${PYTHON}" verify.py
 
-MODEL_VERSION="$(python3 - <<'PY'
+MODEL_VERSION="$("${PYTHON}" - <<'PY'
 import joblib
 from pathlib import Path
 
@@ -168,7 +172,7 @@ if path.exists():
 PY
 )"
 if [[ -n "${MODEL_VERSION}" ]]; then
-  python3 scripts/deploy_lock.py write \
+  "${PYTHON}" scripts/deploy_lock.py write \
     --model-version "${MODEL_VERSION}" \
     --repo-commit "${COMMIT}"
 fi

@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -43,8 +45,9 @@ from train_reference_stack import (  # noqa: E402
 
 DEFAULT_OUTPUT = REPO_ROOT / "models" / "bot_detector_innovative.joblib"
 DEFAULT_DEPLOY_PATH = REPO_ROOT / "models" / "bot_detector_v1.joblib"
-MODEL_VERSION = "reference-dualbranch-v5-rank"
+MODEL_VERSION = "reference-dualbranch-v6-rank-first"
 HOLDOUT_SOURCE_DATES = 5
+RANK_FIRST = True
 
 
 def holdout_mask_from_metadata(
@@ -86,21 +89,34 @@ def _live_selection_tuple(
     *,
     groups: np.ndarray,
     holdout_mask: np.ndarray | None = None,
+    rank_first: bool = RANK_FIRST,
 ) -> tuple[float, float, float, float]:
     from train_reference_stack import _within_group_spearman
 
     rew, meta = reward(live_scores, y)
+    spearman_full = float(_within_group_spearman(live_scores, y, groups).get("mean", 0.0))
+    if holdout_mask is not None and bool(holdout_mask.any()):
+        spearman = float(
+            _within_group_spearman(
+                live_scores[holdout_mask],
+                y[holdout_mask],
+                groups[holdout_mask],
+            ).get("mean", 0.0)
+        )
+    else:
+        spearman = spearman_full
+    human_mask = y == 0
+    cls_penalty = (
+        float((live_scores[human_mask] >= 0.5).mean()) if human_mask.any() else 0.0
+    )
+    fpr = float(meta.get("fpr", 1.0) or 1.0)
+    bot_recall = float(meta.get("bot_recall", 0.0) or 0.0)
+    if rank_first:
+        return (spearman, -cls_penalty, -fpr, bot_recall)
     holdout_rew = float(rew)
     if holdout_mask is not None and bool(holdout_mask.any()):
         holdout_rew, _ = reward(live_scores[holdout_mask], y[holdout_mask])
-    spearman = float(_within_group_spearman(live_scores, y, groups).get("mean", 0.0))
-    bot_recall = float(meta.get("bot_recall", 0.0) or 0.0)
-    return (
-        float(holdout_rew),
-        float(rew),
-        bot_recall,
-        spearman,
-    )
+    return (holdout_rew, float(rew), bot_recall, spearman_full)
 
 
 def sweep_blend(
@@ -113,13 +129,14 @@ def sweep_blend(
     max_positive_rate: float,
     holdout_mask: np.ndarray | None = None,
 ) -> tuple[float, dict[str, Any], dict[str, Any], np.ndarray]:
-    best_alpha = 0.75
+    best_alpha = 0.20 if RANK_FIRST else 0.75
     best_metrics: dict[str, Any] = {}
     best_settings: dict[str, Any] = {}
     best_scores = abs_oof
     best_selection = (-1.0, -1.0, -1.0, -1.0)
 
-    for alpha in np.linspace(0.15, 0.55, 9):
+    alpha_values = np.linspace(0.10, 0.30, 9) if RANK_FIRST else np.linspace(0.15, 0.55, 9)
+    for alpha in alpha_values:
         scores = alpha * abs_oof + (1.0 - alpha) * rel_oof
         settings, metrics = select_live_calibration(
             scores,
@@ -127,6 +144,7 @@ def sweep_blend(
             max_fpr=max_fpr,
             max_positive_rate=max_positive_rate,
             groups=groups,
+            rank_first=RANK_FIRST,
         )
         live = _simulate_live_scores(scores, settings, max_positive_rate=max_positive_rate)
         selection = _live_selection_tuple(
@@ -134,12 +152,13 @@ def sweep_blend(
             y,
             groups=groups,
             holdout_mask=holdout_mask,
+            rank_first=RANK_FIRST,
         )
-        batch_spearman = selection[3]
+        batch_spearman = selection[0] if RANK_FIRST else selection[3]
         print(
-            f"alpha={alpha:.2f} holdout={selection[0]:.4f} reward={selection[1]:.4f} "
-            f"bot_recall={selection[2]:.4f} fpr={metrics.get('reward_meta', {}).get('fpr', 0.0):.4f} "
-            f"batch_spearman={batch_spearman:.4f}"
+            f"alpha={alpha:.2f} spearman={selection[0]:.4f} cls_pen={-selection[1]:.4f} "
+            f"fpr={-selection[2]:.4f} bot_recall={selection[3]:.4f} "
+            f"reward={metrics.get('reward', 0.0):.4f} batch_spearman={batch_spearman:.4f}"
         )
         if selection > best_selection:
             best_selection = selection
@@ -147,8 +166,10 @@ def sweep_blend(
             best_settings = settings
             best_metrics = metrics
             best_metrics["batch_spearman"] = batch_spearman
-            best_metrics["holdout_reward"] = selection[0]
-            best_metrics["bot_recall"] = selection[2]
+            best_metrics["holdout_spearman"] = selection[0] if RANK_FIRST else batch_spearman
+            best_metrics["classification_penalty"] = float(-selection[1]) if RANK_FIRST else 0.0
+            best_metrics["holdout_reward"] = float(metrics.get("reward", 0.0))
+            best_metrics["bot_recall"] = selection[3] if RANK_FIRST else selection[2]
             best_scores = scores
     return best_alpha, best_settings, best_metrics, best_scores
 
@@ -181,9 +202,10 @@ def train_branch_oof(
     folds: int,
     transform_relative: bool,
     weights: np.ndarray | None = None,
+    n_jobs: int = 1,
 ) -> tuple[list[Any], np.ndarray]:
     weights = np.asarray(weights if weights is not None else sample_weights(y), dtype=float)
-    specs = make_base_models(seed)
+    specs = make_base_models(seed, n_jobs=n_jobs)
     cv = GroupKFold(n_splits=max(2, min(folds, len(np.unique(groups)))))
     oof = np.zeros((len(y), len(specs)), dtype=float)
 
@@ -194,7 +216,13 @@ def train_branch_oof(
             x_train = transform_batch_relative_rows(x_train, groups[train_idx])
             x_valid = transform_batch_relative_rows(x_valid, groups[valid_idx])
         for model_idx, (_, model) in enumerate(specs):
-            fitted = fit_model(clone(model), x_train, y[train_idx], weights[train_idx])
+            fitted = fit_model(
+                clone(model),
+                x_train,
+                y[train_idx],
+                weights[train_idx],
+                groups[train_idx],
+            )
             oof[valid_idx, model_idx] = _predict_pos(fitted, x_valid)
         branch = "relative" if transform_relative else "absolute"
         print(f"Finished {branch} fold {fold_idx}/{cv.get_n_splits()}")
@@ -202,7 +230,7 @@ def train_branch_oof(
     final_models: list[Any] = []
     x_full = transform_batch_relative_rows(x, groups) if transform_relative else x
     for _, model in specs:
-        final_models.append(fit_model(clone(model), x_full, y, weights))
+        final_models.append(fit_model(clone(model), x_full, y, weights, groups))
     return final_models, np.mean(oof, axis=1)
 
 
@@ -232,21 +260,24 @@ def sweep_rank_boost(
             y,
             groups=groups,
             holdout_mask=holdout_mask,
+            rank_first=RANK_FIRST,
         )
         print(
-            f"rank_boost={boost:.2f} holdout={selection[0]:.4f} reward={selection[1]:.4f} "
-            f"bot_recall={selection[2]:.4f} batch_spearman={selection[3]:.4f}"
+            f"rank_boost={boost:.2f} spearman={selection[0]:.4f} cls_pen={-selection[1]:.4f} "
+            f"fpr={-selection[2]:.4f} bot_recall={selection[3]:.4f}"
         )
         if selection > best_selection:
             best_boost = float(boost)
             best_selection = selection
             _, meta = reward(live, y)
             best_metrics = {
-                "reward": selection[1],
+                "reward": float(reward(live, y)[0]),
                 "reward_meta": meta,
-                "batch_spearman": selection[3],
-                "holdout_reward": selection[0],
-                "bot_recall": selection[2],
+                "batch_spearman": selection[0],
+                "holdout_spearman": selection[0],
+                "classification_penalty": float(-selection[1]),
+                "holdout_reward": float(reward(live, y)[0]),
+                "bot_recall": selection[3],
                 "score_std": float(live.std()),
                 "score_max": float(live.max()),
             }
@@ -314,9 +345,16 @@ def main() -> None:
     parser.add_argument("--state-file", type=Path, default=DEFAULT_STATE_PATH)
     parser.add_argument("--deploy-path", type=Path, default=DEFAULT_DEPLOY_PATH)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--folds", type=int, default=5)
+    parser.add_argument("--folds", type=int, default=3)
+    parser.add_argument("--n-jobs", type=int, default=1)
     parser.add_argument("--max-fpr", type=float, default=0.02)
-    parser.add_argument("--max-positive-rate", type=float, default=0.08)
+    parser.add_argument("--max-positive-rate", type=float, default=0.05)
+    parser.add_argument(
+        "--min-source-date",
+        type=str,
+        default="2026-06-13",
+        help="Only use benchmark releases on or after this sourceDate (v1.12+).",
+    )
     parser.add_argument("--deploy", action="store_true")
     parser.add_argument("--live-augment", action="store_true")
     parser.add_argument(
@@ -327,12 +365,17 @@ def main() -> None:
     parser.add_argument("--pseudo-weight", type=float, default=0.45)
     parser.add_argument("--pseudo-max-examples", type=int, default=800)
     args = parser.parse_args()
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
 
     model_version = MODEL_VERSION
     training_weights: np.ndarray | None = None
 
     print("Fetching benchmark examples...")
-    feature_dicts, y, metadata, benchmark_state = fetch_training_examples()
+    feature_dicts, y, metadata, benchmark_state = fetch_training_examples(
+        min_source_date=args.min_source_date or None,
+    )
     if args.live_augment:
         pseudo_features, pseudo_labels, pseudo_metadata = build_pseudo_labeled_examples(
             store_dir=args.live_store_dir,
@@ -376,7 +419,9 @@ def main() -> None:
         folds=args.folds,
         transform_relative=False,
         weights=training_weights,
+        n_jobs=args.n_jobs,
     )
+    gc.collect()
     rel_models, rel_oof = train_branch_oof(
         x,
         y,
@@ -385,7 +430,9 @@ def main() -> None:
         folds=args.folds,
         transform_relative=True,
         weights=training_weights,
+        n_jobs=args.n_jobs,
     )
+    gc.collect()
 
     alpha, live_settings, live_metrics, blended_oof = sweep_blend(
         abs_oof,
@@ -445,7 +492,7 @@ def main() -> None:
             "score_remap": {},
             "metrics": live_metrics,
             "diagnostics": diagnostics,
-            "training_objective": "dual_branch_absolute_relative_live_holdout",
+            "training_objective": "dual_branch_rank_first_spearman_v6",
         },
         "metrics": live_metrics,
         "training_samples": len(y),

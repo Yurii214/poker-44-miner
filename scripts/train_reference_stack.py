@@ -68,9 +68,20 @@ def fetch_benchmark_state() -> dict[str, Any]:
     }
 
 
-def fetch_training_examples() -> tuple[list[dict[str, float]], np.ndarray, list[dict], dict]:
+def fetch_training_examples(
+    *,
+    min_source_date: str | None = None,
+) -> tuple[list[dict[str, float]], np.ndarray, list[dict], dict]:
     benchmark_state = fetch_benchmark_state()
     releases = _get_json(f"{API_BASE}/releases")["data"]["releases"]
+    if min_source_date:
+        releases = [
+            release
+            for release in releases
+            if str(release.get("sourceDate", "")) >= str(min_source_date)
+        ]
+        benchmark_state["min_source_date"] = str(min_source_date)
+        benchmark_state["filtered_release_count"] = int(len(releases))
     feature_dicts: list[dict[str, float]] = []
     labels: list[int] = []
     metadata: list[dict] = []
@@ -126,7 +137,7 @@ def sample_weights(labels: np.ndarray) -> np.ndarray:
     return weights
 
 
-def make_base_models(seed: int) -> list[tuple[str, Any]]:
+def make_base_models(seed: int, *, n_jobs: int = -1) -> list[tuple[str, Any]]:
     return [
         (
             "lgb",
@@ -144,7 +155,7 @@ def make_base_models(seed: int) -> list[tuple[str, Any]]:
                 class_weight="balanced",
                 random_state=seed,
                 verbose=-1,
-                n_jobs=-1,
+                n_jobs=n_jobs,
             ),
         ),
         (
@@ -162,7 +173,7 @@ def make_base_models(seed: int) -> list[tuple[str, Any]]:
                 reg_lambda=1.0,
                 random_state=seed + 2,
                 verbose=-1,
-                n_jobs=-1,
+                n_jobs=n_jobs,
             ),
         ),
         (
@@ -178,16 +189,26 @@ def make_base_models(seed: int) -> list[tuple[str, Any]]:
                 reg_lambda=1.8,
                 eval_metric="aucpr",
                 random_state=seed + 1,
-                n_jobs=-1,
+                n_jobs=n_jobs,
             ),
         ),
     ]
 
 
-def fit_model(model: Any, x: np.ndarray, y: np.ndarray, weights: np.ndarray) -> Any:
+def fit_model(
+    model: Any,
+    x: np.ndarray,
+    y: np.ndarray,
+    weights: np.ndarray,
+    groups: np.ndarray | None = None,
+) -> Any:
     import lightgbm as lgb
+
+    from poker44_ml.rank_stack import fit_ranker
+
     if isinstance(model, lgb.LGBMRanker):
-        # LGBMRanker needs group sizes (one group per sample for pairwise ranking)
+        if groups is not None and len(np.unique(groups)) > 1:
+            return fit_ranker(model, x, y, groups)
         group = np.ones(len(y), dtype=int)
         try:
             return model.fit(x, y, group=group, sample_weight=weights)
@@ -332,22 +353,31 @@ def select_live_calibration(
     batch_size: int = 40,
     max_positive_rate: float = 0.10,
     groups: np.ndarray | None = None,
+    rank_first: bool = False,
 ) -> tuple[dict[str, float | str | bool], dict[str, Any]]:
-    spread_blend = 0.70
+    spread_blend = 0.85 if rank_first else 0.70
     spread_bounds = (
         (None, None),
-        (0.12, 0.40),
+        (0.08, 0.35),
         (0.10, 0.38),
+        (0.12, 0.40),
+    ) if rank_first else (
+        (None, None),
+        (0.08, 0.35),
+        (0.10, 0.38),
+        (0.12, 0.40),
         (0.15, 0.42),
         (0.18, 0.48),
     )
+    target_medians = (0.12, 0.16, 0.20) if rank_first else (0.20, 0.24, 0.28)
+    temperatures = (0.55, 0.65) if rank_first else (0.55, 0.65, 0.75)
     best: tuple[tuple[float, float, float, float], dict[str, Any], np.ndarray] | None = None
     fallback: tuple[tuple[float, float, float, float], dict[str, Any], np.ndarray] | None = None
 
     for spread_low, spread_high in spread_bounds:
         for center_blend in (0.0, 0.5, 0.75):
-            for target_median in (0.20, 0.24, 0.28):
-                for temperature in (0.55, 0.65, 0.75):
+            for target_median in target_medians:
+                for temperature in temperatures:
                     live_scores = simulate_live_miner_scores(
                         scores,
                         bias=2.2,
@@ -370,12 +400,26 @@ def select_live_calibration(
                                 0.0,
                             )
                         )
-                    candidate = (
-                        float(batch_spearman),
-                        float(rew),
-                        float(average_precision_score(labels, live_scores)),
-                        -float(meta.get("fpr", 1.0)),
+                    human_mask = labels == 0
+                    cls_penalty = (
+                        float((live_scores[human_mask] >= 0.5).mean())
+                        if human_mask.any()
+                        else 0.0
                     )
+                    if rank_first:
+                        candidate = (
+                            float(batch_spearman),
+                            -cls_penalty,
+                            -float(meta.get("fpr", 1.0)),
+                            float(rew),
+                        )
+                    else:
+                        candidate = (
+                            float(batch_spearman),
+                            float(rew),
+                            float(average_precision_score(labels, live_scores)),
+                            -float(meta.get("fpr", 1.0)),
+                        )
                     payload = {
                         "temperature": float(temperature),
                         "center_blend": float(center_blend),
