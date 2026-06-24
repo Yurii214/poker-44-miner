@@ -49,6 +49,27 @@ MODEL_VERSION = "reference-dualbranch-v6-rank-first"
 HOLDOUT_SOURCE_DATES = 5
 RANK_FIRST = True
 
+TRAIN_PROFILES: dict[str, dict[str, Any]] = {
+    "v6": {
+        "model_version": "reference-dualbranch-v6-rank-first",
+        "training_objective": "dual_branch_rank_first_spearman_v6",
+        "max_fpr": 0.02,
+        "max_positive_rate": 0.05,
+        "spread_blend": 0.85,
+        "target_medians": (0.12, 0.16, 0.20),
+        "live_augment_default": True,
+    },
+    "v6.1": {
+        "model_version": "reference-dualbranch-v6.1-rank-first",
+        "training_objective": "dual_branch_rank_first_spearman_v6.1_stealth",
+        "max_fpr": 0.01,
+        "max_positive_rate": 0.03,
+        "spread_blend": 0.88,
+        "target_medians": (0.08, 0.10, 0.12, 0.14),
+        "live_augment_default": True,
+    },
+}
+
 
 def holdout_mask_from_metadata(
     metadata: list[dict[str, Any]],
@@ -128,7 +149,9 @@ def sweep_blend(
     max_fpr: float,
     max_positive_rate: float,
     holdout_mask: np.ndarray | None = None,
+    calibration_kwargs: dict[str, Any] | None = None,
 ) -> tuple[float, dict[str, Any], dict[str, Any], np.ndarray]:
+    calibration_kwargs = calibration_kwargs or {}
     best_alpha = 0.20 if RANK_FIRST else 0.75
     best_metrics: dict[str, Any] = {}
     best_settings: dict[str, Any] = {}
@@ -145,6 +168,7 @@ def sweep_blend(
             max_positive_rate=max_positive_rate,
             groups=groups,
             rank_first=RANK_FIRST,
+            **calibration_kwargs,
         )
         live = _simulate_live_scores(scores, settings, max_positive_rate=max_positive_rate)
         selection = _live_selection_tuple(
@@ -339,16 +363,78 @@ def evaluate_artifact_reward(
     return float(rew)
 
 
+def evaluate_artifact_spearman(
+    artifact: dict[str, Any],
+    feature_dicts: list[dict[str, float]],
+    y: np.ndarray,
+    *,
+    groups: np.ndarray | None = None,
+) -> float:
+    from train_reference_stack import _within_group_spearman
+
+    model = artifact["models"][0]
+    feature_names = artifact["feature_names"]
+    x = np.asarray(
+        [[float(row.get(name, 0.0)) for name in feature_names] for row in feature_dicts],
+        dtype=float,
+    )
+    if groups is None:
+        groups = np.zeros(len(x), dtype=int)
+    md = artifact.get("metadata") or {}
+    boost = float(md.get("live_batch_rank_boost", 0.0) or 0.0)
+    raw = np.zeros(len(x), dtype=float)
+    for group_id in np.unique(groups):
+        mask = groups == group_id
+        batch_x = x[mask]
+        batch_features = [feature_dicts[int(idx)] for idx in np.where(mask)[0]]
+        if hasattr(model, "predict_chunk_scores"):
+            raw[mask] = np.asarray(
+                model.predict_chunk_scores(
+                    [[] for _ in range(int(mask.sum()))],
+                    feature_rows=[list(row) for row in batch_x],
+                ),
+                dtype=float,
+            )
+        else:
+            raw[mask] = np.asarray(model.predict_proba(batch_x))[:, 1]
+        if boost > 0.0:
+            boosted = batch_rank_boost(
+                batch_features,
+                raw[mask].tolist(),
+                blend=boost,
+            )
+            raw[mask] = np.asarray(boosted, dtype=float)
+    live = simulate_live_miner_scores(
+        raw,
+        bias=float(md.get("score_logit_bias", 2.2) or 2.2),
+        temperature=float(md.get("score_logit_temperature", 0.65) or 0.65),
+        spread_blend=float(md.get("live_batch_spread_blend", 0.70) or 0.70),
+        center_blend=float(md.get("live_batch_center_blend", 0.0) or 0.0),
+        spread_low=md.get("live_batch_spread_low"),
+        spread_high=md.get("live_batch_spread_high"),
+        max_positive_rate=float(md.get("live_max_positive_rate", 0.10) or 0.10),
+        logit_mode=str(md.get("live_logit_mode", "adaptive") or "adaptive"),
+        target_median=float(md.get("live_logit_target_median", 0.24) or 0.24),
+    )
+    return float(_within_group_spearman(live, y, groups).get("mean", 0.0))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--state-file", type=Path, default=DEFAULT_STATE_PATH)
     parser.add_argument("--deploy-path", type=Path, default=DEFAULT_DEPLOY_PATH)
+    parser.add_argument(
+        "--profile",
+        choices=sorted(TRAIN_PROFILES),
+        default="v6",
+        help="Training preset (v6.1 = stealth rankQ: lower median, 3%% positive cap).",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--folds", type=int, default=3)
     parser.add_argument("--n-jobs", type=int, default=1)
-    parser.add_argument("--max-fpr", type=float, default=0.02)
-    parser.add_argument("--max-positive-rate", type=float, default=0.05)
+    parser.add_argument("--max-fpr", type=float, default=None)
+    parser.add_argument("--max-positive-rate", type=float, default=None)
     parser.add_argument(
         "--min-source-date",
         type=str,
@@ -356,32 +442,65 @@ def main() -> None:
         help="Only use benchmark releases on or after this sourceDate (v1.12+).",
     )
     parser.add_argument("--deploy", action="store_true")
+    parser.add_argument(
+        "--force-deploy",
+        action="store_true",
+        help="Deploy even if benchmark reward regresses (use with spearman gate).",
+    )
     parser.add_argument("--live-augment", action="store_true")
+    parser.add_argument(
+        "--no-live-augment",
+        action="store_true",
+        help="Disable live pseudo-label augmentation.",
+    )
     parser.add_argument(
         "--live-store-dir",
         type=Path,
         default=REPO_ROOT / "models" / "live_chunks",
     )
     parser.add_argument("--pseudo-weight", type=float, default=0.45)
-    parser.add_argument("--pseudo-max-examples", type=int, default=800)
+    parser.add_argument("--pseudo-max-examples", type=int, default=400)
+    parser.add_argument(
+        "--pseudo-max-batches",
+        type=int,
+        default=120,
+        help="Max logged validator batches to scan (streamed; not loaded all at once).",
+    )
     args = parser.parse_args()
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
     os.environ.setdefault("MKL_NUM_THREADS", "1")
 
-    model_version = MODEL_VERSION
+    profile = TRAIN_PROFILES[args.profile]
+    if args.max_fpr is None:
+        args.max_fpr = float(profile["max_fpr"])
+    if args.max_positive_rate is None:
+        args.max_positive_rate = float(profile["max_positive_rate"])
+    use_live_augment = bool(profile.get("live_augment_default", False))
+    if args.live_augment:
+        use_live_augment = True
+    if args.no_live_augment:
+        use_live_augment = False
+    calibration_kwargs = {
+        "target_medians": tuple(profile["target_medians"]),
+        "spread_blend": float(profile["spread_blend"]),
+    }
+    training_objective = str(profile["training_objective"])
+    model_version = str(profile["model_version"])
     training_weights: np.ndarray | None = None
 
     print("Fetching benchmark examples...")
     feature_dicts, y, metadata, benchmark_state = fetch_training_examples(
         min_source_date=args.min_source_date or None,
     )
-    if args.live_augment:
+    if use_live_augment:
         pseudo_features, pseudo_labels, pseudo_metadata = build_pseudo_labeled_examples(
             store_dir=args.live_store_dir,
             model_path=args.deploy_path if args.deploy_path.exists() else DEFAULT_DEPLOY_PATH,
             max_examples=args.pseudo_max_examples,
+            max_batches=args.pseudo_max_batches,
         )
+        gc.collect()
         print(
             f"Live pseudo-labels | examples={len(pseudo_labels)} "
             f"bot={int(pseudo_labels.sum()) if len(pseudo_labels) else 0} "
@@ -398,7 +517,7 @@ def main() -> None:
                 pseudo_weight=args.pseudo_weight,
             )
             benchmark_state["live_pseudo_examples"] = int(len(pseudo_labels))
-            model_version = f"{MODEL_VERSION}-augmented"
+            model_version = f"{model_version}-augmented"
         else:
             print("No high-confidence live pseudo labels yet; training on benchmark only.")
 
@@ -442,6 +561,7 @@ def main() -> None:
         max_fpr=args.max_fpr,
         max_positive_rate=args.max_positive_rate,
         holdout_mask=holdout_mask,
+        calibration_kwargs=calibration_kwargs,
     )
 
     rank_boost, rank_metrics = sweep_rank_boost(
@@ -492,7 +612,7 @@ def main() -> None:
             "score_remap": {},
             "metrics": live_metrics,
             "diagnostics": diagnostics,
-            "training_objective": "dual_branch_rank_first_spearman_v6",
+            "training_objective": training_objective,
         },
         "metrics": live_metrics,
         "training_samples": len(y),
@@ -508,6 +628,8 @@ def main() -> None:
     print(f"Saved model to {args.output}")
 
     baseline_reward = 0.0
+    baseline_spearman = 0.0
+    baseline_artifact: dict[str, Any] | None = None
     if args.deploy_path.exists():
         baseline_artifact = joblib.load(args.deploy_path)
         baseline_reward = evaluate_artifact_reward(
@@ -516,15 +638,30 @@ def main() -> None:
             y,
             groups=groups,
         )
+        baseline_spearman = evaluate_artifact_spearman(
+            baseline_artifact,
+            feature_dicts,
+            y,
+            groups=groups,
+        )
+        del baseline_artifact
+        gc.collect()
     new_reward = evaluate_artifact_reward(
         artifact,
         feature_dicts,
         y,
         groups=groups,
     )
-    print(f"Benchmark reward comparison | baseline={baseline_reward:.4f} new={new_reward:.4f}")
+    new_spearman = float(live_metrics.get("batch_spearman", 0.0) or 0.0)
+    print(
+        f"Benchmark comparison | baseline_reward={baseline_reward:.4f} new_reward={new_reward:.4f} "
+        f"baseline_spearman={baseline_spearman:.4f} new_spearman={new_spearman:.4f}"
+    )
 
-    if args.deploy and new_reward >= baseline_reward - 0.005:
+    reward_ok = new_reward >= baseline_reward - 0.005
+    spearman_ok = new_spearman >= baseline_spearman - 0.01
+    deploy_ok = reward_ok or spearman_ok or args.force_deploy
+    if args.deploy and deploy_ok:
         backup_path = args.deploy_path.with_name(
             f"{args.deploy_path.stem}.{model_version}_backup.joblib"
         )
@@ -533,7 +670,8 @@ def main() -> None:
         joblib.dump(artifact, args.deploy_path)
         print(f"DEPLOYED {args.deploy_path} backup={backup_path}")
     else:
-        print("Skipped deploy (insufficient improvement or --deploy not set).")
+        reason = "insufficient improvement" if args.deploy else "--deploy not set"
+        print(f"Skipped deploy ({reason}). reward_ok={reward_ok} spearman_ok={spearman_ok}")
 
 
 if __name__ == "__main__":

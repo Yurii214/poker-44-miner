@@ -10,15 +10,23 @@ MAX_FPR="${MAX_FPR:-0.02}"
 MAX_POSITIVE_RATE="${MAX_POSITIVE_RATE:-0.05}"
 MIN_SOURCE_DATE="${MIN_SOURCE_DATE:-2026-06-13}"
 DEPLOY="${DEPLOY:-1}"
+LIVE_AUGMENT="${LIVE_AUGMENT:-1}"
 
 ARGS=(
   scripts/train_innovative_model.py
+  --profile v6
   --max-fpr "${MAX_FPR}"
   --max-positive-rate "${MAX_POSITIVE_RATE}"
   --min-source-date "${MIN_SOURCE_DATE}"
-  --live-augment
+  --folds 3
+  --n-jobs 1
   --pseudo-max-examples 400
+  --pseudo-max-batches 120
 )
+
+if [[ "${LIVE_AUGMENT}" == "1" ]]; then
+  ARGS+=(--live-augment)
+fi
 
 if [[ "${DEPLOY}" == "1" ]]; then
   ARGS+=(--deploy)

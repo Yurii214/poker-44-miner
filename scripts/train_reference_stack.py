@@ -354,8 +354,10 @@ def select_live_calibration(
     max_positive_rate: float = 0.10,
     groups: np.ndarray | None = None,
     rank_first: bool = False,
+    target_medians: tuple[float, ...] | None = None,
+    spread_blend: float | None = None,
 ) -> tuple[dict[str, float | str | bool], dict[str, Any]]:
-    spread_blend = 0.85 if rank_first else 0.70
+    spread_blend = float(spread_blend if spread_blend is not None else (0.85 if rank_first else 0.70))
     spread_bounds = (
         (None, None),
         (0.08, 0.35),
@@ -369,7 +371,8 @@ def select_live_calibration(
         (0.15, 0.42),
         (0.18, 0.48),
     )
-    target_medians = (0.12, 0.16, 0.20) if rank_first else (0.20, 0.24, 0.28)
+    if target_medians is None:
+        target_medians = (0.12, 0.16, 0.20) if rank_first else (0.20, 0.24, 0.28)
     temperatures = (0.55, 0.65) if rank_first else (0.55, 0.65, 0.75)
     best: tuple[tuple[float, float, float, float], dict[str, Any], np.ndarray] | None = None
     fallback: tuple[tuple[float, float, float, float], dict[str, Any], np.ndarray] | None = None

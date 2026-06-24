@@ -175,22 +175,22 @@ def iter_logged_batches(
     store_dir: str | Path | None = None,
     *,
     max_batches: int | None = None,
-) -> list[dict[str, Any]]:
-    """Load logged validator batches newest files first."""
+):
+    """Yield logged validator batches newest files first (streaming, low memory)."""
     store = Path(store_dir or os.getenv("POKER44_LIVE_CHUNK_DIR", DEFAULT_STORE_DIR))
     chunk_dir = store / "chunks"
     if not chunk_dir.exists():
-        return []
+        return
 
     files = sorted(chunk_dir.glob("*.jsonl.gz"), reverse=True)
-    batches: list[dict[str, Any]] = []
+    seen = 0
     for path in files:
         with gzip.open(path, "rt", encoding="utf-8") as handle:
             for line in handle:
                 line = line.strip()
                 if not line:
                     continue
-                batches.append(json.loads(line))
-                if max_batches is not None and len(batches) >= max_batches:
-                    return batches
-    return batches
+                yield json.loads(line)
+                seen += 1
+                if max_batches is not None and seen >= max_batches:
+                    return

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ from poker44_ml.live_chunk_store import iter_logged_batches
 
 PSEUDO_SOURCE = "live_pseudo"
 DEFAULT_PSEUDO_WEIGHT = 0.35
+DEFAULT_MAX_BATCHES = 120
 
 
 def build_pseudo_labeled_examples(
@@ -23,26 +25,36 @@ def build_pseudo_labeled_examples(
     min_bot_score: float = 0.62,
     max_human_score: float = 0.18,
     max_examples: int = 400,
-    max_batches: int | None = 500,
+    max_batches: int | None = DEFAULT_MAX_BATCHES,
 ) -> tuple[list[dict[str, float]], np.ndarray, list[dict[str, Any]]]:
-    """High-confidence teacher labels on novel live chunks only."""
-    model = teacher or Poker44Model(model_path=model_path)
-    batches = iter_logged_batches(store_dir, max_batches=max_batches)
+    """High-confidence teacher labels on novel live chunks only.
+
+    Streams logged batches one at a time so large live-chunk archives do not
+    need to fit in memory (each batch can be several MB of hand payloads).
+    """
+    lazy_teacher = teacher
     feature_dicts: list[dict[str, float]] = []
     labels: list[int] = []
     metadata: list[dict[str, Any]] = []
     seen_signatures: set[str] = set()
+    batches_scanned = 0
 
-    for batch in batches:
+    for batch in iter_logged_batches(store_dir, max_batches=max_batches):
+        batches_scanned += 1
         chunks = batch.get("chunks") or []
         if not chunks:
             continue
         final_scores = batch.get("final_scores") or []
         if len(final_scores) != len(chunks):
-            final_scores = model.predict_chunk_scores(chunks)
+            if lazy_teacher is None:
+                lazy_teacher = teacher or Poker44Model(model_path=model_path)
+            final_scores = lazy_teacher.predict_chunk_scores(chunks)
         signatures = batch.get("chunk_signatures") or []
         for index, chunk in enumerate(chunks):
             if len(feature_dicts) >= max_examples:
+                if lazy_teacher is not teacher:
+                    del lazy_teacher
+                gc.collect()
                 return (
                     feature_dicts,
                     np.asarray(labels, dtype=int),
@@ -74,6 +86,10 @@ def build_pseudo_labeled_examples(
                 }
             )
             seen_signatures.add(signature)
+
+    if lazy_teacher is not teacher:
+        del lazy_teacher
+    gc.collect()
     return feature_dicts, np.asarray(labels, dtype=int), metadata
 
 

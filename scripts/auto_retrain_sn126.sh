@@ -10,6 +10,8 @@ RETRAIN_INTERVAL_SECONDS="${RETRAIN_INTERVAL_SECONDS:-21600}"
 MAX_FPR="${MAX_FPR:-0.02}"
 MAX_POSITIVE_RATE="${MAX_POSITIVE_RATE:-0.05}"
 MIN_SOURCE_DATE="${MIN_SOURCE_DATE:-2026-06-13}"
+LIVE_AUGMENT="${LIVE_AUGMENT:-1}"
+PSEUDO_MAX_BATCHES="${PSEUDO_MAX_BATCHES:-120}"
 
 log() {
   printf '[%s] %s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$*" | tee -a "${LOG_FILE}"
@@ -65,15 +67,19 @@ should_retrain() {
 }
 
 run_retrain() {
-  log "Starting v6 retrain (max_fpr=${MAX_FPR}, max_positive_rate=${MAX_POSITIVE_RATE}, min_source_date=${MIN_SOURCE_DATE})"
+  log "Starting ${TRAIN_PROFILE:-v6} retrain (max_fpr=${MAX_FPR}, max_positive_rate=${MAX_POSITIVE_RATE}, min_source_date=${MIN_SOURCE_DATE})"
   cd "${ROOT}"
   "${PYTHON}" scripts/train_innovative_model.py \
+    --profile "${TRAIN_PROFILE:-v6}" \
     --deploy \
-    --live-augment \
     --max-fpr "${MAX_FPR}" \
     --max-positive-rate "${MAX_POSITIVE_RATE}" \
     --min-source-date "${MIN_SOURCE_DATE}" \
+    --folds 3 \
+    --n-jobs 1 \
     --pseudo-max-examples 400 \
+    --pseudo-max-batches "${PSEUDO_MAX_BATCHES}" \
+    ${LIVE_AUGMENT:+--live-augment} \
     2>&1 | tee -a "${LOG_FILE}"
 
   "${PYTHON}" scripts/generate_release_manifest.py | tee -a "${LOG_FILE}"
