@@ -356,6 +356,7 @@ def select_live_calibration(
     rank_first: bool = False,
     target_medians: tuple[float, ...] | None = None,
     spread_blend: float | None = None,
+    spearman_mask: np.ndarray | None = None,
 ) -> tuple[dict[str, float | str | bool], dict[str, Any]]:
     spread_blend = float(spread_blend if spread_blend is not None else (0.85 if rank_first else 0.70))
     spread_bounds = (
@@ -396,9 +397,20 @@ def select_live_calibration(
                     )
                     rew, meta = reward(live_scores, labels)
                     batch_spearman = 0.0
-                    if groups is not None:
+                    spearman_labels = labels
+                    spearman_scores = live_scores
+                    spearman_groups = groups
+                    if spearman_mask is not None and bool(spearman_mask.any()):
+                        spearman_labels = labels[spearman_mask]
+                        spearman_scores = live_scores[spearman_mask]
+                        spearman_groups = groups[spearman_mask] if groups is not None else None
+                    if spearman_groups is not None:
                         batch_spearman = float(
-                            _within_group_spearman(live_scores, labels, groups).get(
+                            _within_group_spearman(
+                                spearman_scores,
+                                spearman_labels,
+                                spearman_groups,
+                            ).get(
                                 "mean",
                                 0.0,
                             )

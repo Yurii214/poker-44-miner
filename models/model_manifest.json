@@ -1,5 +1,5 @@
 {
-  "artifact_sha256": "1721b7fb448bc88af393704636ae97b78b8df7bbb66dc8a50409a4e7264c563e",
+  "artifact_sha256": "ea3f56ae5f9e2a488c8c4709acad441564ec59c13ad4f281cc8b4c96e1770ea1",
   "artifact_url": "models/bot_detector_v1.joblib",
   "data_attestation": "Training data is limited to public Poker44 benchmark releases and miner-visible hand payloads from api.poker44.net. No validator-private live labels, human PII, or proprietary table data were used.",
   "framework": "lightgbm-xgboost-batch-rank-stack-quantile-remap",
@@ -17,11 +17,11 @@
   "license": "MIT",
   "model_card_url": "https://github.com/Yurii214/poker-44-miner/blob/main/README.md",
   "model_name": "poker44-innovative-dual-branch",
-  "model_version": "reference-dualbranch-v6.1-rank-first-augmented",
+  "model_version": "reference-dualbranch-v6.2-rank-first-augmented",
   "notes": "Dual-branch benchmark stack with bounded live calibration.",
   "open_source": true,
   "private_data_attestation": "This miner does not train on validator-only live evaluation labels.",
-  "repo_commit": "b1229939444b8747ba00ee62fb44e14d5ac91656",
+  "repo_commit": "82a57572d483c2545ef7f9473bb2825063a4b73b",
   "repo_url": "https://github.com/Yurii214/poker-44-miner",
   "schema_version": "1",
   "training_data_sources": [

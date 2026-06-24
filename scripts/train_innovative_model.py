@@ -29,6 +29,8 @@ from poker44_ml.innovative_model import (
     transform_batch_relative_rows,
 )
 from poker44_ml.live_augmentation import (
+    PSEUDO_SOURCE,
+    balance_pseudo_examples,
     build_pseudo_labeled_examples,
     merge_training_sets,
 )
@@ -68,7 +70,47 @@ TRAIN_PROFILES: dict[str, dict[str, Any]] = {
         "target_medians": (0.08, 0.10, 0.12, 0.14),
         "live_augment_default": True,
     },
+    "v6.2": {
+        "model_version": "reference-dualbranch-v6.2-rank-first",
+        "training_objective": "dual_branch_rank_first_spearman_v6.2_balanced",
+        "max_fpr": 0.01,
+        "max_positive_rate": 0.025,
+        "spread_blend": 0.90,
+        "target_medians": (0.10, 0.12, 0.14, 0.16),
+        "live_augment_default": True,
+        "pseudo_balance": True,
+        "pseudo_max_per_class": 50,
+        "pseudo_min_bot_score": 0.68,
+        "pseudo_max_human_score": 0.14,
+        "pseudo_weight": 0.30,
+        "benchmark_only_selection": True,
+    },
 }
+
+
+def benchmark_holdout_mask(
+    metadata: list[dict[str, Any]],
+    *,
+    holdout_dates: int = HOLDOUT_SOURCE_DATES,
+) -> np.ndarray:
+    """Date holdout on benchmark rows only (exclude live pseudo-label rows)."""
+    bench_meta = [row for row in metadata if row.get("source") != PSEUDO_SOURCE]
+    dates = sorted({str(row["source_date"]) for row in bench_meta})
+    if len(dates) <= 1:
+        return np.zeros(len(metadata), dtype=bool)
+    keep = max(1, min(int(holdout_dates), len(dates) // 3 or 1))
+    holdout = set(dates[-keep:])
+    return np.asarray(
+        [
+            row.get("source") != PSEUDO_SOURCE and str(row["source_date"]) in holdout
+            for row in metadata
+        ],
+        dtype=bool,
+    )
+
+
+def benchmark_rows_mask(metadata: list[dict[str, Any]]) -> np.ndarray:
+    return np.asarray([row.get("source") != PSEUDO_SOURCE for row in metadata], dtype=bool)
 
 
 def holdout_mask_from_metadata(
@@ -419,6 +461,24 @@ def evaluate_artifact_spearman(
     return float(_within_group_spearman(live, y, groups).get("mean", 0.0))
 
 
+def evaluate_artifact_spearman_masked(
+    artifact: dict[str, Any],
+    feature_dicts: list[dict[str, float]],
+    y: np.ndarray,
+    groups: np.ndarray,
+    mask: np.ndarray,
+) -> float:
+    idx = np.flatnonzero(mask)
+    if len(idx) == 0:
+        return 0.0
+    return evaluate_artifact_spearman(
+        artifact,
+        [feature_dicts[int(i)] for i in idx],
+        y[idx],
+        groups=groups[idx],
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
@@ -485,6 +545,12 @@ def main() -> None:
         "target_medians": tuple(profile["target_medians"]),
         "spread_blend": float(profile["spread_blend"]),
     }
+    selection_holdout_mask: np.ndarray | None = None
+    spearman_eval_mask: np.ndarray | None = None
+    pseudo_weight = float(args.pseudo_weight)
+    if profile.get("benchmark_only_selection"):
+        selection_holdout_mask = None  # set after metadata load
+        spearman_eval_mask = None
     training_objective = str(profile["training_objective"])
     model_version = str(profile["model_version"])
     training_weights: np.ndarray | None = None
@@ -494,12 +560,29 @@ def main() -> None:
         min_source_date=args.min_source_date or None,
     )
     if use_live_augment:
+        pseudo_kwargs: dict[str, Any] = {
+            "store_dir": args.live_store_dir,
+            "model_path": args.deploy_path if args.deploy_path.exists() else DEFAULT_DEPLOY_PATH,
+            "max_examples": args.pseudo_max_examples,
+            "max_batches": args.pseudo_max_batches,
+        }
+        if "pseudo_min_bot_score" in profile:
+            pseudo_kwargs["min_bot_score"] = float(profile["pseudo_min_bot_score"])
+        if "pseudo_max_human_score" in profile:
+            pseudo_kwargs["max_human_score"] = float(profile["pseudo_max_human_score"])
         pseudo_features, pseudo_labels, pseudo_metadata = build_pseudo_labeled_examples(
-            store_dir=args.live_store_dir,
-            model_path=args.deploy_path if args.deploy_path.exists() else DEFAULT_DEPLOY_PATH,
-            max_examples=args.pseudo_max_examples,
-            max_batches=args.pseudo_max_batches,
+            **pseudo_kwargs,
         )
+        if profile.get("pseudo_balance") and len(pseudo_labels):
+            pseudo_features, pseudo_labels, pseudo_metadata = balance_pseudo_examples(
+                pseudo_features,
+                pseudo_labels,
+                pseudo_metadata,
+                max_per_class=int(profile.get("pseudo_max_per_class", 50)),
+                seed=args.seed,
+            )
+        if "pseudo_weight" in profile:
+            pseudo_weight = float(profile["pseudo_weight"])
         gc.collect()
         print(
             f"Live pseudo-labels | examples={len(pseudo_labels)} "
@@ -514,7 +597,7 @@ def main() -> None:
                 pseudo_features,
                 pseudo_labels,
                 pseudo_metadata,
-                pseudo_weight=args.pseudo_weight,
+                pseudo_weight=pseudo_weight,
             )
             benchmark_state["live_pseudo_examples"] = int(len(pseudo_labels))
             model_version = f"{model_version}-augmented"
@@ -523,11 +606,18 @@ def main() -> None:
 
     x, feature_names = vectorize(feature_dicts)
     groups = batch_groups_from_metadata(metadata)
-    holdout_mask = holdout_mask_from_metadata(metadata)
+    if profile.get("benchmark_only_selection"):
+        selection_holdout_mask = benchmark_holdout_mask(metadata)
+        spearman_eval_mask = benchmark_rows_mask(metadata)
+        calibration_kwargs["spearman_mask"] = spearman_eval_mask
+        holdout_mask = selection_holdout_mask
+    else:
+        holdout_mask = holdout_mask_from_metadata(metadata)
     holdout_count = int(holdout_mask.sum())
+    bench_count = int(spearman_eval_mask.sum()) if spearman_eval_mask is not None else len(y)
     print(
         f"Loaded {len(y)} samples | features={len(feature_names)} | "
-        f"groups={len(np.unique(groups))} | holdout={holdout_count}"
+        f"groups={len(np.unique(groups))} | holdout={holdout_count} | benchmark={bench_count}"
     )
 
     abs_models, abs_oof = train_branch_oof(
@@ -560,7 +650,7 @@ def main() -> None:
         groups=groups,
         max_fpr=args.max_fpr,
         max_positive_rate=args.max_positive_rate,
-        holdout_mask=holdout_mask,
+        holdout_mask=selection_holdout_mask if selection_holdout_mask is not None else holdout_mask,
         calibration_kwargs=calibration_kwargs,
     )
 
@@ -571,7 +661,7 @@ def main() -> None:
         groups=groups,
         live_settings=live_settings,
         max_positive_rate=args.max_positive_rate,
-        holdout_mask=holdout_mask,
+        holdout_mask=selection_holdout_mask if selection_holdout_mask is not None else holdout_mask,
     )
     live_settings["live_batch_rank_boost"] = rank_boost
     live_metrics["rank_boost_metrics"] = rank_metrics
@@ -629,7 +719,14 @@ def main() -> None:
 
     baseline_reward = 0.0
     baseline_spearman = 0.0
+    baseline_holdout_spearman = 0.0
     baseline_artifact: dict[str, Any] | None = None
+    bench_mask = benchmark_rows_mask(metadata)
+    eval_holdout_mask = (
+        selection_holdout_mask
+        if selection_holdout_mask is not None and selection_holdout_mask.any()
+        else holdout_mask
+    )
     if args.deploy_path.exists():
         baseline_artifact = joblib.load(args.deploy_path)
         baseline_reward = evaluate_artifact_reward(
@@ -638,11 +735,19 @@ def main() -> None:
             y,
             groups=groups,
         )
-        baseline_spearman = evaluate_artifact_spearman(
+        baseline_spearman = evaluate_artifact_spearman_masked(
             baseline_artifact,
             feature_dicts,
             y,
-            groups=groups,
+            groups,
+            bench_mask,
+        )
+        baseline_holdout_spearman = evaluate_artifact_spearman_masked(
+            baseline_artifact,
+            feature_dicts,
+            y,
+            groups,
+            eval_holdout_mask,
         )
         del baseline_artifact
         gc.collect()
@@ -652,14 +757,28 @@ def main() -> None:
         y,
         groups=groups,
     )
-    new_spearman = float(live_metrics.get("batch_spearman", 0.0) or 0.0)
+    new_spearman = evaluate_artifact_spearman_masked(
+        artifact,
+        feature_dicts,
+        y,
+        groups,
+        bench_mask,
+    )
+    new_holdout_spearman = evaluate_artifact_spearman_masked(
+        artifact,
+        feature_dicts,
+        y,
+        groups,
+        eval_holdout_mask,
+    )
     print(
         f"Benchmark comparison | baseline_reward={baseline_reward:.4f} new_reward={new_reward:.4f} "
-        f"baseline_spearman={baseline_spearman:.4f} new_spearman={new_spearman:.4f}"
+        f"baseline_spearman={baseline_spearman:.4f} new_spearman={new_spearman:.4f} "
+        f"holdout_spearman={new_holdout_spearman:.4f} baseline_holdout={baseline_holdout_spearman:.4f}"
     )
 
     reward_ok = new_reward >= baseline_reward - 0.005
-    spearman_ok = new_spearman >= baseline_spearman - 0.01
+    spearman_ok = new_holdout_spearman >= baseline_holdout_spearman - 0.005
     deploy_ok = reward_ok or spearman_ok or args.force_deploy
     if args.deploy and deploy_ok:
         backup_path = args.deploy_path.with_name(

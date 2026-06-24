@@ -93,6 +93,35 @@ def build_pseudo_labeled_examples(
     return feature_dicts, np.asarray(labels, dtype=int), metadata
 
 
+def balance_pseudo_examples(
+    feature_dicts: list[dict[str, float]],
+    labels: np.ndarray,
+    metadata: list[dict[str, Any]],
+    *,
+    max_per_class: int = 50,
+    seed: int = 42,
+) -> tuple[list[dict[str, float]], np.ndarray, list[dict[str, Any]]]:
+    """Downsample the majority pseudo-label class to reduce live-augment skew."""
+    if len(labels) == 0:
+        return feature_dicts, labels, metadata
+    bot_idx = np.flatnonzero(labels == 1)
+    human_idx = np.flatnonzero(labels == 0)
+    if len(bot_idx) == 0 or len(human_idx) == 0:
+        return feature_dicts, labels, metadata
+    rng = np.random.default_rng(seed)
+    keep_n = min(len(bot_idx), len(human_idx), int(max_per_class))
+    picked = np.concatenate([
+        rng.choice(bot_idx, size=keep_n, replace=False),
+        rng.choice(human_idx, size=keep_n, replace=False),
+    ])
+    picked.sort()
+    return (
+        [feature_dicts[int(i)] for i in picked],
+        labels[picked],
+        [metadata[int(i)] for i in picked],
+    )
+
+
 def merge_training_sets(
     benchmark_features: list[dict[str, float]],
     benchmark_labels: np.ndarray,
