@@ -142,27 +142,36 @@ class Miner(BaseMinerNeuron):
         """Keep live batches under the human-safety cliff while preserving order."""
         if not scores:
             return scores
-        max_positive = max(1, int(len(scores) * self.max_positive_rate))
-        positive_count = sum(score >= 0.5 for score in scores)
-        if positive_count <= max_positive:
-            return scores
-
-        sorted_scores = sorted(scores, reverse=True)
-        cutoff = sorted_scores[max_positive - 1]
-        scale = (0.5 - SCORE_CAP_EPSILON) / max(cutoff, SCORE_CAP_EPSILON)
-        capped_scores = [
-            score if score >= cutoff else score * scale
-            for score in scores
-        ]
-        capped_positive_count = sum(score >= 0.5 for score in capped_scores)
-        bt.logging.warning(
-            "Applied live positive cap | "
-            f"count={len(scores)} before={positive_count} "
-            f"after={capped_positive_count} max_allowed={max_positive} "
-            f"rate={self.max_positive_rate:.2f} "
-            f"cutoff={cutoff:.6f}"
+        hard_ceiling = float(
+            self.detector.metadata.get("live_score_ceiling", 0.49) or 0.49
         )
-        return [round(max(0.0, min(1.0, score)), 6) for score in capped_scores]
+        max_positive = int(len(scores) * self.max_positive_rate)
+        positive_count = sum(score >= 0.5 for score in scores)
+        capped_scores = list(scores)
+        cutoff_val = 0.0
+        if positive_count > max_positive:
+            sorted_scores = sorted(scores, reverse=True)
+            if max_positive <= 0:
+                cutoff_val = sorted_scores[0]
+                scale = (0.5 - SCORE_CAP_EPSILON) / max(sorted_scores[0], SCORE_CAP_EPSILON)
+                capped_scores = [score * scale for score in scores]
+            else:
+                cutoff_val = sorted_scores[max_positive - 1]
+                scale = (0.5 - SCORE_CAP_EPSILON) / max(cutoff_val, SCORE_CAP_EPSILON)
+                capped_scores = [
+                    score if score >= cutoff_val else score * scale
+                    for score in scores
+                ]
+            bt.logging.warning(
+                "Applied live positive cap | "
+                f"count={len(scores)} before={positive_count} "
+                f"after={sum(s >= 0.5 for s in capped_scores)} max_allowed={max_positive} "
+                f"rate={self.max_positive_rate:.3f} cutoff={cutoff_val:.6f}"
+            )
+        capped_scores = [
+            round(max(0.0, min(hard_ceiling, score)), 6) for score in capped_scores
+        ]
+        return capped_scores
 
     async def forward(self, synapse: DetectionSynapse) -> DetectionSynapse:
         chunks = synapse.chunks or []

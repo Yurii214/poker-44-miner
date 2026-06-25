@@ -85,6 +85,24 @@ TRAIN_PROFILES: dict[str, dict[str, Any]] = {
         "pseudo_weight": 0.30,
         "benchmark_only_selection": True,
     },
+    "v6.3": {
+        "model_version": "reference-dualbranch-v6.3-rank-first",
+        "training_objective": "dual_branch_rank_first_spearman_v6.3_stealth_rank",
+        "max_fpr": 0.005,
+        "max_positive_rate": 0.02,
+        "spread_blend": 0.92,
+        "target_medians": (0.14, 0.16, 0.18, 0.20, 0.22),
+        "live_augment_default": False,
+        "benchmark_only_selection": True,
+        "live_score_ceiling": 0.49,
+        "center_blends": (0.0,),
+        "spread_bounds": (
+            (None, None),
+            (0.10, 0.42),
+            (0.12, 0.45),
+            (0.14, 0.48),
+        ),
+    },
 }
 
 
@@ -143,6 +161,7 @@ def _simulate_live_scores(
         max_positive_rate=max_positive_rate,
         logit_mode=str(settings.get("live_logit_mode", "adaptive") or "adaptive"),
         target_median=float(settings.get("live_logit_target_median", 0.24) or 0.24),
+        hard_ceiling=settings.get("live_score_ceiling", 0.49),
     )
 
 
@@ -400,6 +419,7 @@ def evaluate_artifact_reward(
         max_positive_rate=float(md.get("live_max_positive_rate", 0.10) or 0.10),
         logit_mode=str(md.get("live_logit_mode", "adaptive") or "adaptive"),
         target_median=float(md.get("live_logit_target_median", 0.24) or 0.24),
+        hard_ceiling=md.get("live_score_ceiling", 0.49),
     )
     rew, _ = reward(live, y)
     return float(rew)
@@ -545,6 +565,12 @@ def main() -> None:
         "target_medians": tuple(profile["target_medians"]),
         "spread_blend": float(profile["spread_blend"]),
     }
+    if "center_blends" in profile:
+        calibration_kwargs["center_blends"] = tuple(profile["center_blends"])
+    if "spread_bounds" in profile:
+        calibration_kwargs["spread_bounds"] = tuple(profile["spread_bounds"])
+    if "live_score_ceiling" in profile:
+        calibration_kwargs["hard_ceiling"] = float(profile["live_score_ceiling"])
     selection_holdout_mask: np.ndarray | None = None
     spearman_eval_mask: np.ndarray | None = None
     pseudo_weight = float(args.pseudo_weight)

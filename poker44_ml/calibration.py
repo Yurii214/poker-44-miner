@@ -164,20 +164,28 @@ def apply_live_positive_cap(
     *,
     max_positive_rate: float = 0.10,
     score_cap_epsilon: float = 1e-6,
+    hard_ceiling: float | None = 0.49,
 ) -> np.ndarray:
-    """Mirror miner-side cap: keep only the top few scores above 0.5."""
+    """Mirror miner-side cap: limit hard flags at 0.5 while preserving order."""
     values = np.asarray(scores, dtype=float)
     if values.size == 0:
         return values
-    max_positive = max(1, int(values.size * max_positive_rate))
+    max_positive = int(values.size * max_positive_rate)
     positive_count = int((values >= 0.5).sum())
-    if positive_count <= max_positive:
-        return values
-    sorted_scores = np.sort(values)[::-1]
-    cutoff = float(sorted_scores[max_positive - 1])
-    scale = (0.5 - score_cap_epsilon) / max(cutoff, score_cap_epsilon)
-    capped = np.where(values >= cutoff, values, values * scale)
-    return np.clip(capped, 0.0, 1.0)
+    if positive_count > max_positive:
+        sorted_scores = np.sort(values)[::-1]
+        if max_positive <= 0:
+            scale = (0.5 - score_cap_epsilon) / max(float(sorted_scores[0]), score_cap_epsilon)
+            values = np.clip(values * scale, 0.0, 0.5 - score_cap_epsilon)
+        else:
+            cutoff = float(sorted_scores[max_positive - 1])
+            scale = (0.5 - score_cap_epsilon) / max(cutoff, score_cap_epsilon)
+            values = np.where(values >= cutoff, values, values * scale)
+            values = np.clip(values, 0.0, 1.0)
+    if hard_ceiling is not None:
+        ceiling = float(hard_ceiling)
+        values = np.clip(values, 0.0, ceiling)
+    return values
 
 
 def simulate_live_miner_scores(
@@ -193,6 +201,7 @@ def simulate_live_miner_scores(
     max_positive_rate: float = 0.10,
     logit_mode: str = "fixed",
     target_median: float = 0.28,
+    hard_ceiling: float | None = 0.49,
 ) -> np.ndarray:
     """End-to-end live path: batch spread -> logit calibration -> positive cap."""
     spread = simulate_live_batch_scores(
@@ -236,6 +245,7 @@ def simulate_live_miner_scores(
         output[start:stop] = apply_live_positive_cap(
             calibrated,
             max_positive_rate=max_positive_rate,
+            hard_ceiling=hard_ceiling,
         )
     return output
 

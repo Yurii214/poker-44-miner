@@ -357,21 +357,27 @@ def select_live_calibration(
     target_medians: tuple[float, ...] | None = None,
     spread_blend: float | None = None,
     spearman_mask: np.ndarray | None = None,
+    center_blends: tuple[float, ...] | None = None,
+    spread_bounds: tuple[tuple[float | None, float | None], ...] | None = None,
+    hard_ceiling: float | None = 0.49,
 ) -> tuple[dict[str, float | str | bool], dict[str, Any]]:
     spread_blend = float(spread_blend if spread_blend is not None else (0.85 if rank_first else 0.70))
-    spread_bounds = (
-        (None, None),
-        (0.08, 0.35),
-        (0.10, 0.38),
-        (0.12, 0.40),
-    ) if rank_first else (
-        (None, None),
-        (0.08, 0.35),
-        (0.10, 0.38),
-        (0.12, 0.40),
-        (0.15, 0.42),
-        (0.18, 0.48),
-    )
+    if spread_bounds is None:
+        spread_bounds = (
+            (None, None),
+            (0.08, 0.35),
+            (0.10, 0.38),
+            (0.12, 0.40),
+        ) if rank_first else (
+            (None, None),
+            (0.08, 0.35),
+            (0.10, 0.38),
+            (0.12, 0.40),
+            (0.15, 0.42),
+            (0.18, 0.48),
+        )
+    if center_blends is None:
+        center_blends = (0.0, 0.5, 0.75)
     if target_medians is None:
         target_medians = (0.12, 0.16, 0.20) if rank_first else (0.20, 0.24, 0.28)
     temperatures = (0.55, 0.65) if rank_first else (0.55, 0.65, 0.75)
@@ -379,7 +385,7 @@ def select_live_calibration(
     fallback: tuple[tuple[float, float, float, float], dict[str, Any], np.ndarray] | None = None
 
     for spread_low, spread_high in spread_bounds:
-        for center_blend in (0.0, 0.5, 0.75):
+        for center_blend in center_blends:
             for target_median in target_medians:
                 for temperature in temperatures:
                     live_scores = simulate_live_miner_scores(
@@ -394,6 +400,7 @@ def select_live_calibration(
                         max_positive_rate=max_positive_rate,
                         logit_mode="adaptive",
                         target_median=float(target_median),
+                        hard_ceiling=hard_ceiling,
                     )
                     rew, meta = reward(live_scores, labels)
                     batch_spearman = 0.0
@@ -450,6 +457,8 @@ def select_live_calibration(
                         fallback = packed
                     if float(meta.get("fpr", 1.0)) > max_fpr:
                         continue
+                    if rank_first and cls_penalty > 0.0:
+                        continue
                     if best is None or candidate > best[0]:
                         best = packed
 
@@ -473,6 +482,8 @@ def select_live_calibration(
     if payload.get("spread_low") is not None and payload.get("spread_high") is not None:
         live_settings["live_batch_spread_low"] = float(payload["spread_low"])
         live_settings["live_batch_spread_high"] = float(payload["spread_high"])
+    if hard_ceiling is not None:
+        live_settings["live_score_ceiling"] = float(hard_ceiling)
     metrics = {
         "reward": float(payload["reward"]),
         "reward_meta": payload["reward_meta"],
