@@ -107,11 +107,30 @@ class Poker44Model:
         self.live_batch_rank_boost = float(
             self.metadata.get("live_batch_rank_boost", 0.0) or 0.0
         )
+        self.live_score_ceiling = float(
+            self.metadata.get("live_score_ceiling", 0.49) or 0.49
+        )
+        self.live_regime_enabled = bool(self.metadata.get("live_regime_enabled", False))
+        self.live_regime_threshold = float(
+            self.metadata.get("live_regime_threshold", 0.35) or 0.35
+        )
+        human_spread = self.metadata.get("live_human_spread") or [0.04, 0.16]
+        bot_spread = self.metadata.get("live_bot_spread") or [0.22, 0.48]
+        self.live_human_spread = (float(human_spread[0]), float(human_spread[1]))
+        self.live_bot_spread = (float(bot_spread[0]), float(bot_spread[1]))
+        anomaly_payload = artifact.get("anomaly_scorer")
+        self.anomaly_scorer = None
+        if anomaly_payload is not None:
+            from poker44_ml.anomaly_branch import HumanIsolationScorer
+
+            self.anomaly_scorer = HumanIsolationScorer.from_dict(anomaly_payload)
+        self.hybrid_fusion = str(self.metadata.get("hybrid_fusion", "max") or "max")
         self.model_weights = list(
             artifact.get("model_weights")
             or self.metadata.get("model_weights")
             or [1.0 for _ in self.models]
         )
+        self._regime_target_median = self.live_logit_target_median
 
     @staticmethod
     def _clamp01(value: float) -> float:
@@ -190,6 +209,14 @@ class Poker44Model:
                 for weight, model_scores in zip(weights, per_model)
             ) / total_weight
             scores.append(self._clamp01(value))
+        if self.anomaly_scorer is not None:
+            from poker44_ml.anomaly_branch import fuse_hybrid_scores
+
+            x = np.asarray(rows, dtype=float)
+            iso = self.anomaly_scorer.predict_bot_scores(x)
+            sup = np.asarray(scores, dtype=float)
+            fused = fuse_hybrid_scores(sup, iso, mode=self.hybrid_fusion)
+            scores = [self._clamp01(float(v)) for v in fused]
         return scores
 
     def _apply_calibrator(self, scores: list[float]) -> list[float]:
@@ -202,7 +229,7 @@ class Poker44Model:
             return [self._clamp01(value) for value in self.calibrator.transform(scores)]
         return [self._clamp01(value) for value in scores]
 
-    def _apply_batch_spread(self, scores: list[float]) -> list[float]:
+    def _apply_batch_spread(self, scores: list[float], raw_scores: list[float] | None = None) -> list[float]:
         if not scores or not self.live_batch_spread:
             return [self._clamp01(value) for value in scores]
         values = np.asarray(scores, dtype=float)
@@ -211,6 +238,19 @@ class Poker44Model:
                 values,
                 blend=self.live_batch_center_blend,
             )
+        if self.live_regime_enabled and raw_scores is not None:
+            from poker44_ml.calibration import apply_regime_batch_spread
+
+            prior = float(np.mean(raw_scores))
+            spread, self._regime_target_median = apply_regime_batch_spread(
+                values,
+                batch_prior=prior,
+                regime_threshold=self.live_regime_threshold,
+                human_spread=self.live_human_spread,
+                bot_spread=self.live_bot_spread,
+                blend=self.live_batch_spread_blend,
+            )
+            return [self._clamp01(float(value)) for value in spread]
         spread = apply_batch_quantile_spread(
             values,
             blend=self.live_batch_spread_blend,
@@ -247,6 +287,13 @@ class Poker44Model:
         if not scores:
             return []
         values = np.asarray(scores, dtype=float)
+        if self.live_regime_enabled and hasattr(self, "_regime_target_median"):
+            calibrated = apply_batch_adaptive_logit(
+                values,
+                target_median=float(self._regime_target_median),
+                temperature=self.score_logit_temperature,
+            )
+            return [self._clamp01(float(value)) for value in calibrated]
         if self._should_use_adaptive_logit(values):
             calibrated = apply_batch_adaptive_logit(
                 values,
@@ -279,7 +326,7 @@ class Poker44Model:
                 blend=self.live_batch_rank_boost,
             )
         calibrated_scores = self._apply_calibrator(raw_scores)
-        spread_scores = self._apply_batch_spread(calibrated_scores)
+        spread_scores = self._apply_batch_spread(calibrated_scores, raw_scores=raw_scores)
         remapped_scores = self._apply_score_remap(spread_scores)
         logit_scores = self._apply_score_logit(remapped_scores)
         return [round(self._clamp01(value), 6) for value in logit_scores]
@@ -309,7 +356,7 @@ class Poker44Model:
                 blend=self.live_batch_rank_boost,
             )
         calibrated_scores = self._apply_calibrator(raw_scores)
-        spread_scores = self._apply_batch_spread(calibrated_scores)
+        spread_scores = self._apply_batch_spread(calibrated_scores, raw_scores=raw_scores)
         remapped_scores = self._apply_score_remap(spread_scores)
         logit_scores = self._apply_score_logit(remapped_scores)
         return {

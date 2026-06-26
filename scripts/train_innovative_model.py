@@ -42,8 +42,10 @@ from train_reference_stack import (  # noqa: E402
     make_base_models,
     sample_weights,
     select_live_calibration,
+    select_regime_calibration,
     vectorize,
 )
+from poker44_ml.anomaly_branch import HumanIsolationScorer, fuse_hybrid_scores
 
 DEFAULT_OUTPUT = REPO_ROOT / "models" / "bot_detector_innovative.joblib"
 DEFAULT_DEPLOY_PATH = REPO_ROOT / "models" / "bot_detector_v1.joblib"
@@ -102,6 +104,18 @@ TRAIN_PROFILES: dict[str, dict[str, Any]] = {
             (0.12, 0.45),
             (0.14, 0.48),
         ),
+    },
+    "v6.4": {
+        "model_version": "reference-dualbranch-v6.4-hybrid-regime",
+        "training_objective": "dual_branch_hybrid_iso_regime_v6.4",
+        "max_fpr": 0.005,
+        "max_positive_rate": 0.02,
+        "spread_blend": 0.94,
+        "live_augment_default": False,
+        "benchmark_only_selection": True,
+        "live_score_ceiling": 0.49,
+        "hybrid_isolation": True,
+        "regime_calibration": True,
     },
 }
 
@@ -162,6 +176,10 @@ def _simulate_live_scores(
         logit_mode=str(settings.get("live_logit_mode", "adaptive") or "adaptive"),
         target_median=float(settings.get("live_logit_target_median", 0.24) or 0.24),
         hard_ceiling=settings.get("live_score_ceiling", 0.49),
+        regime_enabled=bool(settings.get("live_regime_enabled", False)),
+        regime_threshold=float(settings.get("live_regime_threshold", 0.35) or 0.35),
+        human_spread=tuple(settings.get("live_human_spread") or (0.04, 0.16)),
+        bot_spread=tuple(settings.get("live_bot_spread") or (0.22, 0.48)),
     )
 
 
@@ -211,6 +229,8 @@ def sweep_blend(
     max_positive_rate: float,
     holdout_mask: np.ndarray | None = None,
     calibration_kwargs: dict[str, Any] | None = None,
+    iso_scores: np.ndarray | None = None,
+    use_regime: bool = False,
 ) -> tuple[float, dict[str, Any], dict[str, Any], np.ndarray]:
     calibration_kwargs = calibration_kwargs or {}
     best_alpha = 0.20 if RANK_FIRST else 0.75
@@ -222,15 +242,29 @@ def sweep_blend(
     alpha_values = np.linspace(0.10, 0.30, 9) if RANK_FIRST else np.linspace(0.15, 0.55, 9)
     for alpha in alpha_values:
         scores = alpha * abs_oof + (1.0 - alpha) * rel_oof
-        settings, metrics = select_live_calibration(
-            scores,
-            y,
-            max_fpr=max_fpr,
-            max_positive_rate=max_positive_rate,
-            groups=groups,
-            rank_first=RANK_FIRST,
-            **calibration_kwargs,
-        )
+        if iso_scores is not None:
+            scores = fuse_hybrid_scores(scores, iso_scores, mode="max")
+        if use_regime:
+            settings, metrics = select_regime_calibration(
+                scores,
+                y,
+                max_fpr=max_fpr,
+                max_positive_rate=max_positive_rate,
+                groups=groups,
+                spread_blend=float(calibration_kwargs.get("spread_blend", 0.92)),
+                spearman_mask=calibration_kwargs.get("spearman_mask"),
+                hard_ceiling=calibration_kwargs.get("hard_ceiling", 0.49),
+            )
+        else:
+            settings, metrics = select_live_calibration(
+                scores,
+                y,
+                max_fpr=max_fpr,
+                max_positive_rate=max_positive_rate,
+                groups=groups,
+                rank_first=RANK_FIRST,
+                **calibration_kwargs,
+            )
         live = _simulate_live_scores(scores, settings, max_positive_rate=max_positive_rate)
         selection = _live_selection_tuple(
             live,
@@ -562,7 +596,7 @@ def main() -> None:
     if args.no_live_augment:
         use_live_augment = False
     calibration_kwargs = {
-        "target_medians": tuple(profile["target_medians"]),
+        "target_medians": tuple(profile.get("target_medians", (0.14, 0.16, 0.18))),
         "spread_blend": float(profile["spread_blend"]),
     }
     if "center_blends" in profile:
@@ -669,6 +703,22 @@ def main() -> None:
     )
     gc.collect()
 
+    iso_scorer: HumanIsolationScorer | None = None
+    iso_scores: np.ndarray | None = None
+    if profile.get("hybrid_isolation"):
+        print("Fitting human-only Isolation Forest anomaly branch...")
+        iso_scorer = HumanIsolationScorer.fit(
+            x,
+            y,
+            feature_names,
+            seed=args.seed,
+        )
+        iso_scores = iso_scorer.predict_bot_scores(x)
+        print(
+            f"Anomaly branch | human_rows={int((y == 0).sum())} "
+            f"iso_mean={float(iso_scores.mean()):.4f} iso_max={float(iso_scores.max()):.4f}"
+        )
+
     alpha, live_settings, live_metrics, blended_oof = sweep_blend(
         abs_oof,
         rel_oof,
@@ -678,6 +728,8 @@ def main() -> None:
         max_positive_rate=args.max_positive_rate,
         holdout_mask=selection_holdout_mask if selection_holdout_mask is not None else holdout_mask,
         calibration_kwargs=calibration_kwargs,
+        iso_scores=iso_scores,
+        use_regime=bool(profile.get("regime_calibration", False)),
     )
 
     rank_boost, rank_metrics = sweep_rank_boost(
@@ -720,6 +772,7 @@ def main() -> None:
         "models": [dual_model],
         "model_weights": [1.0],
         "feature_names": feature_names,
+        "anomaly_scorer": iso_scorer.to_dict() if iso_scorer is not None else None,
         "metadata": {
             "model_name": "poker44-innovative-dual-branch",
             "model_version": model_version,

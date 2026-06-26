@@ -329,8 +329,12 @@ def chunk_features(
 
     behavioral = extract_chunk_features(prepared, already_visible=True)
     schema = _schema_chunk_features(prepared)
+    from poker44_ml.consistency_features import cross_hand_consistency_features
+
+    consistency = cross_hand_consistency_features(prepared)
     behavioral.update(
         {name: value for name, value in schema.items() if name != "hand_count"}
     )
+    behavioral.update(consistency)
     return behavioral
 

@@ -499,6 +499,123 @@ def select_live_calibration(
     return live_settings, metrics
 
 
+def select_regime_calibration(
+    scores: np.ndarray,
+    labels: np.ndarray,
+    *,
+    max_fpr: float,
+    batch_size: int = 40,
+    max_positive_rate: float = 0.02,
+    groups: np.ndarray | None = None,
+    spread_blend: float = 0.92,
+    spearman_mask: np.ndarray | None = None,
+    hard_ceiling: float | None = 0.49,
+) -> tuple[dict[str, float | str | bool | list[float]], dict[str, Any]]:
+    from poker44_ml.calibration import simulate_regime_live_miner_scores
+
+    thresholds = (0.28, 0.32, 0.35, 0.38, 0.42)
+    human_spreads = ((0.03, 0.14), (0.04, 0.16), (0.05, 0.18))
+    bot_spreads = ((0.20, 0.45), (0.22, 0.48), (0.24, 0.49))
+    best: tuple[tuple[float, float, float, float], dict[str, Any], np.ndarray] | None = None
+    fallback: tuple[tuple[float, float, float, float], dict[str, Any], np.ndarray] | None = None
+
+    for threshold in thresholds:
+        for human_spread in human_spreads:
+            for bot_spread in bot_spreads:
+                live_scores = simulate_regime_live_miner_scores(
+                    scores,
+                    regime_threshold=float(threshold),
+                    human_spread=tuple(human_spread),
+                    bot_spread=tuple(bot_spread),
+                    spread_blend=spread_blend,
+                    batch_size=batch_size,
+                    max_positive_rate=max_positive_rate,
+                    hard_ceiling=hard_ceiling,
+                )
+                rew, meta = reward(live_scores, labels)
+                batch_spearman = 0.0
+                spearman_labels = labels
+                spearman_scores = live_scores
+                spearman_groups = groups
+                if spearman_mask is not None and bool(spearman_mask.any()):
+                    spearman_labels = labels[spearman_mask]
+                    spearman_scores = live_scores[spearman_mask]
+                    spearman_groups = groups[spearman_mask] if groups is not None else None
+                if spearman_groups is not None:
+                    batch_spearman = float(
+                        _within_group_spearman(
+                            spearman_scores,
+                            spearman_labels,
+                            spearman_groups,
+                        ).get("mean", 0.0)
+                    )
+                human_mask = labels == 0
+                cls_penalty = (
+                    float((live_scores[human_mask] >= 0.5).mean())
+                    if human_mask.any()
+                    else 0.0
+                )
+                candidate = (
+                    float(batch_spearman),
+                    -cls_penalty,
+                    -float(meta.get("fpr", 1.0)),
+                    float(rew),
+                )
+                payload = {
+                    "regime_threshold": float(threshold),
+                    "human_spread": list(human_spread),
+                    "bot_spread": list(bot_spread),
+                    "reward": float(rew),
+                    "reward_meta": meta,
+                    "batch_spearman": batch_spearman,
+                }
+                packed = (candidate, payload, live_scores)
+                if fallback is None or float(rew) > fallback[1]["reward"]:
+                    fallback = packed
+                if float(meta.get("fpr", 1.0)) > max_fpr:
+                    continue
+                if cls_penalty > 0.0:
+                    continue
+                if best is None or candidate > best[0]:
+                    best = packed
+
+    chosen = best or fallback
+    if chosen is None:
+        raise RuntimeError("Could not select regime calibration.")
+    _, payload, live_scores = chosen
+    live_settings = {
+        "live_batch_spread": True,
+        "live_batch_spread_blend": spread_blend,
+        "live_batch_center": False,
+        "live_batch_center_blend": 0.0,
+        "live_max_positive_rate": float(max_positive_rate),
+        "live_logit_mode": "regime",
+        "live_regime_enabled": True,
+        "live_regime_threshold": float(payload["regime_threshold"]),
+        "live_human_spread": list(payload["human_spread"]),
+        "live_bot_spread": list(payload["bot_spread"]),
+        "live_score_ceiling": float(hard_ceiling) if hard_ceiling is not None else 0.49,
+        "score_logit_bias": 2.2,
+        "score_logit_temperature": 0.55,
+        "score_remap": {},
+        "hybrid_fusion": "max",
+    }
+    metrics = {
+        "reward": float(payload["reward"]),
+        "reward_meta": payload["reward_meta"],
+        "average_precision": float(average_precision_score(labels, live_scores)),
+        "roc_auc": float(roc_auc_score(labels, live_scores)),
+        "score_min": float(live_scores.min()),
+        "score_mean": float(live_scores.mean()),
+        "score_max": float(live_scores.max()),
+        "score_std": float(live_scores.std()),
+        "above_05": int((live_scores >= 0.5).sum()),
+        "calibration_choice": payload,
+        "batch_spearman": float(payload.get("batch_spearman", 0.0)),
+    }
+    return live_settings, metrics
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)

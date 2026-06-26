@@ -188,6 +188,74 @@ def apply_live_positive_cap(
     return values
 
 
+def apply_regime_batch_spread(
+    scores: np.ndarray,
+    *,
+    batch_prior: float,
+    regime_threshold: float,
+    human_spread: tuple[float, float],
+    bot_spread: tuple[float, float],
+    blend: float = 0.92,
+) -> tuple[np.ndarray, float]:
+    """Dual-regime spread: tight low band for human-like batches, wide high band for bot-like."""
+    if batch_prior >= float(regime_threshold):
+        low, high = bot_spread
+        target_median = float(bot_spread[0] + (bot_spread[1] - bot_spread[0]) * 0.55)
+    else:
+        low, high = human_spread
+        target_median = float(human_spread[0] + (human_spread[1] - human_spread[0]) * 0.35)
+    spread = apply_batch_quantile_spread(
+        scores,
+        blend=blend,
+        spread_low=low,
+        spread_high=high,
+    )
+    return spread, target_median
+
+
+def simulate_regime_live_miner_scores(
+    raw_scores: np.ndarray,
+    *,
+    regime_threshold: float = 0.35,
+    human_spread: tuple[float, float] = (0.04, 0.16),
+    bot_spread: tuple[float, float] = (0.22, 0.48),
+    spread_blend: float = 0.92,
+    batch_size: int = 40,
+    max_positive_rate: float = 0.02,
+    temperature: float = 0.55,
+    hard_ceiling: float | None = 0.49,
+) -> np.ndarray:
+    """Regime-aware live path: batch prior selects spread band + target median."""
+    values = np.asarray(raw_scores, dtype=float)
+    if values.size == 0:
+        return values
+    batch_size = max(1, int(batch_size))
+    output = np.zeros_like(values)
+    for start in range(0, len(values), batch_size):
+        stop = min(start + batch_size, len(values))
+        batch_raw = values[start:stop]
+        prior = float(np.mean(batch_raw))
+        spread, target_median = apply_regime_batch_spread(
+            batch_raw,
+            batch_prior=prior,
+            regime_threshold=regime_threshold,
+            human_spread=human_spread,
+            bot_spread=bot_spread,
+            blend=spread_blend,
+        )
+        calibrated = apply_batch_adaptive_logit(
+            spread,
+            target_median=target_median,
+            temperature=temperature,
+        )
+        output[start:stop] = apply_live_positive_cap(
+            calibrated,
+            max_positive_rate=max_positive_rate,
+            hard_ceiling=hard_ceiling,
+        )
+    return output
+
+
 def simulate_live_miner_scores(
     raw_scores: np.ndarray,
     *,
@@ -202,8 +270,24 @@ def simulate_live_miner_scores(
     logit_mode: str = "fixed",
     target_median: float = 0.28,
     hard_ceiling: float | None = 0.49,
+    regime_enabled: bool = False,
+    regime_threshold: float = 0.35,
+    human_spread: tuple[float, float] = (0.04, 0.16),
+    bot_spread: tuple[float, float] = (0.22, 0.48),
 ) -> np.ndarray:
     """End-to-end live path: batch spread -> logit calibration -> positive cap."""
+    if regime_enabled:
+        return simulate_regime_live_miner_scores(
+            raw_scores,
+            regime_threshold=regime_threshold,
+            human_spread=human_spread,
+            bot_spread=bot_spread,
+            spread_blend=spread_blend,
+            batch_size=batch_size,
+            max_positive_rate=max_positive_rate,
+            temperature=temperature,
+            hard_ceiling=hard_ceiling,
+        )
     spread = simulate_live_batch_scores(
         raw_scores,
         batch_size=batch_size,
