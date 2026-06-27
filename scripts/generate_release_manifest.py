@@ -21,6 +21,8 @@ def main() -> int:
     implementation_files = [
         ROOT / "neurons/miner.py",
         ROOT / "poker44_ml/features.py",
+        ROOT / "poker44_ml/consistency_features.py",
+        ROOT / "poker44_ml/anomaly_branch.py",
         ROOT / "poker44_ml/inference.py",
         ROOT / "poker44_ml/innovative_model.py",
         ROOT / "poker44_ml/stacked.py",
@@ -75,7 +77,10 @@ def main() -> int:
             "artifact_url": artifact_rel,
             "artifact_sha256": sha256_file(artifact_path) if artifact_path.is_file() else "",
             "model_card_url": f"{repo_url}/blob/main/README.md",
-            "notes": "Dual-branch benchmark stack with bounded live calibration.",
+            "notes": (
+                "Dual-branch hybrid stack (LGBM rank + isolation forest) with "
+                "regime-aware live calibration; trained on benchmark v1.12."
+            ),
         },
     )
     out = ROOT / "models" / "model_manifest.json"

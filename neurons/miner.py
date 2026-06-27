@@ -181,15 +181,15 @@ class Miner(BaseMinerNeuron):
             raw_scores = components.get("final_scores") or self.detector.predict_chunk_scores(chunks)
         else:
             raw_scores = self.detector.predict_chunk_scores(chunks)
-        scores = self._apply_live_positive_cap(raw_scores)
-        synapse.risk_scores = scores
-        synapse.predictions = [score >= 0.5 for score in scores]
-        synapse.model_manifest = dict(self.model_manifest)
-            hybrid_raw = (
+        hybrid_raw = (
             components.get("raw_scores")
             if components
             else self.detector.predict_supervised_raw_scores(chunks)
         )
+        scores = self._apply_live_positive_cap(raw_scores)
+        synapse.risk_scores = scores
+        synapse.predictions = [score >= 0.5 for score in scores]
+        synapse.model_manifest = dict(self.model_manifest)
         if scores and self.log_score_distribution:
             sorted_scores = sorted(scores, reverse=True)
             mean_score = sum(scores) / len(scores)

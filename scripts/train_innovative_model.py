@@ -131,6 +131,27 @@ TRAIN_PROFILES: dict[str, dict[str, Any]] = {
         "regime_calibration": True,
         "live_regime_tune_file": "models/live_regime_tune.json",
     },
+    "v7": {
+        "model_version": "reference-dualbranch-v7-benchmark-v112",
+        "training_objective": "dual_branch_v7_benchmark_v112_generalize",
+        "max_fpr": 0.005,
+        "max_positive_rate": 0.02,
+        "spread_blend": 0.94,
+        "live_augment_default": False,
+        "benchmark_only_selection": True,
+        "live_score_ceiling": 0.49,
+        "hybrid_isolation": True,
+        "regime_calibration": True,
+        "live_regime_tune_file": "models/live_regime_tune.json",
+        "holdout_dates": 7,
+        "center_blends": (0.0,),
+        "spread_bounds": (
+            (None, None),
+            (0.10, 0.42),
+            (0.12, 0.45),
+            (0.14, 0.48),
+        ),
+    },
 }
 
 
@@ -743,7 +764,8 @@ def main() -> None:
     x, feature_names = vectorize(feature_dicts)
     groups = batch_groups_from_metadata(metadata)
     if profile.get("benchmark_only_selection"):
-        selection_holdout_mask = benchmark_holdout_mask(metadata)
+        holdout_dates = int(profile.get("holdout_dates", HOLDOUT_SOURCE_DATES))
+        selection_holdout_mask = benchmark_holdout_mask(metadata, holdout_dates=holdout_dates)
         spearman_eval_mask = benchmark_rows_mask(metadata)
         calibration_kwargs["spearman_mask"] = spearman_eval_mask
         holdout_mask = selection_holdout_mask

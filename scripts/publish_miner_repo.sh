@@ -90,6 +90,7 @@ git add \
   scripts/patch_live_calibration.py \
   scripts/train_innovative_model.py \
   scripts/train_reference_stack.py \
+  scripts/train_v7_benchmark_v112.sh \
   scripts/train_v6_rank_first.sh \
   scripts/auto_retrain_sn126.sh \
   scripts/monitor_uid164_dashboard.py \
