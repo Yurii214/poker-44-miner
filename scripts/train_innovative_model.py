@@ -46,6 +46,7 @@ from train_reference_stack import (  # noqa: E402
     vectorize,
 )
 from poker44_ml.anomaly_branch import HumanIsolationScorer, fuse_hybrid_scores
+from poker44_ml.live_regime_tuning import load_regime_tune
 
 DEFAULT_OUTPUT = REPO_ROOT / "models" / "bot_detector_innovative.joblib"
 DEFAULT_DEPLOY_PATH = REPO_ROOT / "models" / "bot_detector_v1.joblib"
@@ -116,6 +117,19 @@ TRAIN_PROFILES: dict[str, dict[str, Any]] = {
         "live_score_ceiling": 0.49,
         "hybrid_isolation": True,
         "regime_calibration": True,
+    },
+    "v6.5": {
+        "model_version": "reference-dualbranch-v6.5-live-tuned-regime",
+        "training_objective": "dual_branch_hybrid_live_tuned_regime_v6.5",
+        "max_fpr": 0.005,
+        "max_positive_rate": 0.02,
+        "spread_blend": 0.94,
+        "live_augment_default": False,
+        "benchmark_only_selection": True,
+        "live_score_ceiling": 0.49,
+        "hybrid_isolation": True,
+        "regime_calibration": True,
+        "live_regime_tune_file": "models/live_regime_tune.json",
     },
 }
 
@@ -231,6 +245,7 @@ def sweep_blend(
     calibration_kwargs: dict[str, Any] | None = None,
     iso_scores: np.ndarray | None = None,
     use_regime: bool = False,
+    fixed_regime: dict[str, Any] | None = None,
 ) -> tuple[float, dict[str, Any], dict[str, Any], np.ndarray]:
     calibration_kwargs = calibration_kwargs or {}
     best_alpha = 0.20 if RANK_FIRST else 0.75
@@ -244,7 +259,54 @@ def sweep_blend(
         scores = alpha * abs_oof + (1.0 - alpha) * rel_oof
         if iso_scores is not None:
             scores = fuse_hybrid_scores(scores, iso_scores, mode="max")
-        if use_regime:
+        if use_regime and fixed_regime is not None:
+            from poker44_ml.calibration import simulate_regime_live_miner_scores
+
+            threshold = float(fixed_regime["regime_threshold"])
+            human_spread = tuple(fixed_regime["human_spread"])
+            bot_spread = tuple(fixed_regime["bot_spread"])
+            hard_ceiling = calibration_kwargs.get("hard_ceiling", 0.49)
+            live = simulate_regime_live_miner_scores(
+                scores,
+                regime_threshold=threshold,
+                human_spread=human_spread,
+                bot_spread=bot_spread,
+                spread_blend=float(calibration_kwargs.get("spread_blend", 0.94)),
+                max_positive_rate=max_positive_rate,
+                hard_ceiling=hard_ceiling,
+            )
+            settings = {
+                "live_batch_spread": True,
+                "live_batch_spread_blend": float(calibration_kwargs.get("spread_blend", 0.94)),
+                "live_batch_center": False,
+                "live_max_positive_rate": float(max_positive_rate),
+                "live_logit_mode": "regime",
+                "live_regime_enabled": True,
+                "live_regime_threshold": threshold,
+                "live_human_spread": list(human_spread),
+                "live_bot_spread": list(bot_spread),
+                "live_score_ceiling": float(hard_ceiling) if hard_ceiling is not None else 0.49,
+                "score_logit_temperature": 0.55,
+                "hybrid_fusion": "max",
+            }
+            rew, meta = reward(live, y)
+            from train_reference_stack import _within_group_spearman
+
+            batch_spearman = float(_within_group_spearman(live, y, groups).get("mean", 0.0))
+            metrics = {
+                "reward": float(rew),
+                "reward_meta": meta,
+                "batch_spearman": batch_spearman,
+                "score_max": float(live.max()),
+                "above_05": int((live >= 0.5).sum()),
+                "calibration_choice": {
+                    "regime_threshold": threshold,
+                    "human_spread": list(human_spread),
+                    "bot_spread": list(bot_spread),
+                    "method": "live_tune_fixed",
+                },
+            }
+        elif use_regime:
             settings, metrics = select_regime_calibration(
                 scores,
                 y,
@@ -614,6 +676,20 @@ def main() -> None:
     training_objective = str(profile["training_objective"])
     model_version = str(profile["model_version"])
     training_weights: np.ndarray | None = None
+    fixed_regime: dict[str, Any] | None = None
+    if profile.get("live_regime_tune_file"):
+        tune_path = REPO_ROOT / str(profile["live_regime_tune_file"])
+        if not tune_path.is_file():
+            raise FileNotFoundError(
+                f"Missing live regime tune file: {tune_path}. "
+                "Run scripts/tune_regime_from_live_chunks.py first."
+            )
+        fixed_regime = load_regime_tune(tune_path)
+        print(
+            "Using live-tuned regime | "
+            f"threshold={fixed_regime['regime_threshold']:.4f} "
+            f"human={fixed_regime['human_spread']} bot={fixed_regime['bot_spread']}"
+        )
 
     print("Fetching benchmark examples...")
     feature_dicts, y, metadata, benchmark_state = fetch_training_examples(
@@ -730,6 +806,7 @@ def main() -> None:
         calibration_kwargs=calibration_kwargs,
         iso_scores=iso_scores,
         use_regime=bool(profile.get("regime_calibration", False)),
+        fixed_regime=fixed_regime,
     )
 
     rank_boost, rank_metrics = sweep_rank_boost(

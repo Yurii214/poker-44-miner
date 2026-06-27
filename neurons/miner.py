@@ -185,6 +185,11 @@ class Miner(BaseMinerNeuron):
         synapse.risk_scores = scores
         synapse.predictions = [score >= 0.5 for score in scores]
         synapse.model_manifest = dict(self.model_manifest)
+        hybrid_raw = (
+            components.get("raw_scores")
+            if components
+            else self.detector.predict_hybrid_raw_scores(chunks)
+        )
         if scores and self.log_score_distribution:
             sorted_scores = sorted(scores, reverse=True)
             mean_score = sum(scores) / len(scores)
@@ -216,7 +221,7 @@ class Miner(BaseMinerNeuron):
                 validator_hotkey = getattr(dendrite, "hotkey", None)
             logged = log_validator_batch(
                 chunks=chunks,
-                raw_scores=components.get("raw_scores"),
+                raw_scores=hybrid_raw,
                 final_scores=scores,
                 validator_hotkey=validator_hotkey,
                 uid=getattr(self, "uid", None),

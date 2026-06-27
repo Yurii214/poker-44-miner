@@ -314,6 +314,20 @@ class Poker44Model:
         _, feature_dicts = self._extract_features(chunks)
         return feature_dicts
 
+    def predict_hybrid_raw_scores(self, chunks: list[list[dict[str, Any]]]) -> list[float]:
+        """Hybrid fused scores before spread/logit (used for live regime tuning)."""
+        if not chunks:
+            return []
+        rows, feature_rows = self._extract_features(chunks)
+        raw_scores = self._raw_model_scores(rows, chunks=chunks)
+        if self.live_batch_rank_boost > 0.0:
+            raw_scores = batch_rank_boost(
+                feature_rows,
+                raw_scores,
+                blend=self.live_batch_rank_boost,
+            )
+        return [round(self._clamp01(float(value)), 6) for value in raw_scores]
+
     def predict_chunk_scores(self, chunks: list[list[dict[str, Any]]]) -> list[float]:
         if not chunks:
             return []
