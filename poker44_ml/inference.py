@@ -169,6 +169,8 @@ class Poker44Model:
         self,
         rows: list[list[float]],
         chunks: list[list[dict[str, Any]]] | None = None,
+        *,
+        include_anomaly: bool = True,
     ) -> list[float]:
         per_model: list[list[float]] = []
         for model in self.models:
@@ -209,7 +211,7 @@ class Poker44Model:
                 for weight, model_scores in zip(weights, per_model)
             ) / total_weight
             scores.append(self._clamp01(value))
-        if self.anomaly_scorer is not None:
+        if include_anomaly and self.anomaly_scorer is not None:
             from poker44_ml.anomaly_branch import fuse_hybrid_scores
 
             x = np.asarray(rows, dtype=float)
@@ -314,12 +316,26 @@ class Poker44Model:
         _, feature_dicts = self._extract_features(chunks)
         return feature_dicts
 
+    def predict_supervised_raw_scores(self, chunks: list[list[dict[str, Any]]]) -> list[float]:
+        """Dual-branch scores before iso fusion (used for regime batch prior)."""
+        if not chunks:
+            return []
+        rows, feature_rows = self._extract_features(chunks)
+        raw_scores = self._raw_model_scores(rows, chunks=chunks, include_anomaly=False)
+        if self.live_batch_rank_boost > 0.0:
+            raw_scores = batch_rank_boost(
+                feature_rows,
+                raw_scores,
+                blend=self.live_batch_rank_boost,
+            )
+        return [round(self._clamp01(float(value)), 6) for value in raw_scores]
+
     def predict_hybrid_raw_scores(self, chunks: list[list[dict[str, Any]]]) -> list[float]:
         """Hybrid fused scores before spread/logit (used for live regime tuning)."""
         if not chunks:
             return []
         rows, feature_rows = self._extract_features(chunks)
-        raw_scores = self._raw_model_scores(rows, chunks=chunks)
+        raw_scores = self._raw_model_scores(rows, chunks=chunks, include_anomaly=True)
         if self.live_batch_rank_boost > 0.0:
             raw_scores = batch_rank_boost(
                 feature_rows,
@@ -332,15 +348,36 @@ class Poker44Model:
         if not chunks:
             return []
         rows, feature_rows = self._extract_features(chunks)
-        raw_scores = self._raw_model_scores(rows, chunks=chunks)
+        supervised_raw = self._raw_model_scores(
+            rows,
+            chunks=chunks,
+            include_anomaly=False,
+        )
         if self.live_batch_rank_boost > 0.0:
-            raw_scores = batch_rank_boost(
+            supervised_raw = batch_rank_boost(
                 feature_rows,
-                raw_scores,
+                supervised_raw,
                 blend=self.live_batch_rank_boost,
             )
+        raw_scores = list(supervised_raw)
+        if self.anomaly_scorer is not None:
+            from poker44_ml.anomaly_branch import fuse_hybrid_scores
+
+            x = np.asarray(rows, dtype=float)
+            iso = self.anomaly_scorer.predict_bot_scores(x)
+            raw_scores = [
+                self._clamp01(float(v))
+                for v in fuse_hybrid_scores(
+                    np.asarray(supervised_raw, dtype=float),
+                    iso,
+                    mode=self.hybrid_fusion,
+                )
+            ]
         calibrated_scores = self._apply_calibrator(raw_scores)
-        spread_scores = self._apply_batch_spread(calibrated_scores, raw_scores=raw_scores)
+        spread_scores = self._apply_batch_spread(
+            calibrated_scores,
+            raw_scores=supervised_raw,
+        )
         remapped_scores = self._apply_score_remap(spread_scores)
         logit_scores = self._apply_score_logit(remapped_scores)
         return [round(self._clamp01(value), 6) for value in logit_scores]

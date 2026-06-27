@@ -23,16 +23,16 @@ def replay_live_batch_priors(
     store_dir: str | Path | None = None,
     max_batches: int | None = 300,
 ) -> list[dict[str, Any]]:
-    """Replay stored validator batches; return per-batch hybrid-raw stats."""
+    """Replay stored validator batches; return per-batch supervised-raw stats."""
     rows: list[dict[str, Any]] = []
     for batch in iter_logged_batches(store_dir, max_batches=max_batches):
         chunks = batch.get("chunks") or []
         if not chunks:
             continue
-        hybrid_raw = model.predict_hybrid_raw_scores(chunks)
-        if not hybrid_raw:
+        supervised_raw = model.predict_supervised_raw_scores(chunks)
+        if not supervised_raw:
             continue
-        arr = np.asarray(hybrid_raw, dtype=float)
+        arr = np.asarray(supervised_raw, dtype=float)
         rows.append(
             {
                 "ts": batch.get("ts"),
@@ -62,6 +62,9 @@ def estimate_threshold_from_priors(priors: np.ndarray) -> dict[str, float]:
     low = float(gmm.means_.ravel()[order[0]])
     high = float(gmm.means_.ravel()[order[1]])
     threshold = float((low + high) / 2.0)
+    threshold = float(np.clip(threshold, 0.20, 0.45))
+    if float(values.std()) < 0.015:
+        threshold = float(np.clip(np.quantile(values, 0.55), 0.22, 0.38))
     return {
         "regime_threshold": threshold,
         "low_cluster_mean": low,
@@ -141,6 +144,10 @@ def refine_threshold_on_benchmark(
                 if float(meta.get("fpr", 1.0)) > max_fpr:
                     continue
                 if cls_penalty > 0.0:
+                    continue
+                if float(live.max()) < 0.28:
+                    continue
+                if float(live.std()) < 0.06:
                     continue
                 if best is None or candidate > best[0]:
                     best = packed

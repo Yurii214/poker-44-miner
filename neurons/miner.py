@@ -185,10 +185,10 @@ class Miner(BaseMinerNeuron):
         synapse.risk_scores = scores
         synapse.predictions = [score >= 0.5 for score in scores]
         synapse.model_manifest = dict(self.model_manifest)
-        hybrid_raw = (
+            hybrid_raw = (
             components.get("raw_scores")
             if components
-            else self.detector.predict_hybrid_raw_scores(chunks)
+            else self.detector.predict_supervised_raw_scores(chunks)
         )
         if scores and self.log_score_distribution:
             sorted_scores = sorted(scores, reverse=True)
