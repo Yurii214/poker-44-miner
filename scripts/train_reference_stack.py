@@ -506,16 +506,33 @@ def select_regime_calibration(
     max_fpr: float,
     batch_size: int = 40,
     max_positive_rate: float = 0.02,
+    human_max_positive_rate: float | None = None,
+    bot_max_positive_rate: float | None = None,
     groups: np.ndarray | None = None,
     spread_blend: float = 0.92,
     spearman_mask: np.ndarray | None = None,
     hard_ceiling: float | None = 0.49,
+    human_hard_ceiling: float | None = None,
+    bot_hard_ceiling: float | None = None,
+    reward_first: bool = False,
+    min_bot_recall: float = 0.25,
 ) -> tuple[dict[str, float | str | bool | list[float]], dict[str, Any]]:
     from poker44_ml.calibration import simulate_regime_live_miner_scores
 
-    thresholds = (0.28, 0.32, 0.35, 0.38, 0.42)
+    thresholds = (0.22, 0.26, 0.30, 0.34, 0.38, 0.42)
     human_spreads = ((0.03, 0.14), (0.04, 0.16), (0.05, 0.18))
-    bot_spreads = ((0.20, 0.45), (0.22, 0.48), (0.24, 0.49))
+    bot_spreads = (
+        (0.20, 0.45),
+        (0.22, 0.48),
+        (0.24, 0.52),
+        (0.26, 0.55),
+        (0.28, 0.58),
+        (0.30, 0.62),
+    )
+    if human_hard_ceiling is None and hard_ceiling is not None:
+        human_hard_ceiling = float(hard_ceiling)
+    if bot_hard_ceiling is None:
+        bot_hard_ceiling = 0.58
     best: tuple[tuple[float, float, float, float], dict[str, Any], np.ndarray] | None = None
     fallback: tuple[tuple[float, float, float, float], dict[str, Any], np.ndarray] | None = None
 
@@ -530,7 +547,11 @@ def select_regime_calibration(
                     spread_blend=spread_blend,
                     batch_size=batch_size,
                     max_positive_rate=max_positive_rate,
+                    human_max_positive_rate=human_max_positive_rate,
+                    bot_max_positive_rate=bot_max_positive_rate,
                     hard_ceiling=hard_ceiling,
+                    human_hard_ceiling=human_hard_ceiling,
+                    bot_hard_ceiling=bot_hard_ceiling,
                 )
                 rew, meta = reward(live_scores, labels)
                 batch_spearman = 0.0
@@ -555,12 +576,21 @@ def select_regime_calibration(
                     if human_mask.any()
                     else 0.0
                 )
-                candidate = (
-                    float(batch_spearman),
-                    -cls_penalty,
-                    -float(meta.get("fpr", 1.0)),
-                    float(rew),
-                )
+                bot_recall = float(meta.get("bot_recall", 0.0) or 0.0)
+                if reward_first:
+                    candidate = (
+                        float(rew),
+                        bot_recall,
+                        -float(meta.get("fpr", 1.0)),
+                        float(batch_spearman),
+                    )
+                else:
+                    candidate = (
+                        float(batch_spearman),
+                        -cls_penalty,
+                        -float(meta.get("fpr", 1.0)),
+                        float(rew),
+                    )
                 payload = {
                     "regime_threshold": float(threshold),
                     "human_spread": list(human_spread),
@@ -568,6 +598,8 @@ def select_regime_calibration(
                     "reward": float(rew),
                     "reward_meta": meta,
                     "batch_spearman": batch_spearman,
+                    "above_05": int((live_scores >= 0.5).sum()),
+                    "score_max": float(live_scores.max()),
                 }
                 packed = (candidate, payload, live_scores)
                 if fallback is None or float(rew) > fallback[1]["reward"]:
@@ -575,6 +607,8 @@ def select_regime_calibration(
                 if float(meta.get("fpr", 1.0)) > max_fpr:
                     continue
                 if cls_penalty > 0.0:
+                    continue
+                if reward_first and bot_recall < min_bot_recall:
                     continue
                 if best is None or candidate > best[0]:
                     best = packed
@@ -589,12 +623,20 @@ def select_regime_calibration(
         "live_batch_center": False,
         "live_batch_center_blend": 0.0,
         "live_max_positive_rate": float(max_positive_rate),
+        "live_human_max_positive_rate": float(
+            max_positive_rate if human_max_positive_rate is None else human_max_positive_rate
+        ),
+        "live_bot_max_positive_rate": float(
+            max_positive_rate if bot_max_positive_rate is None else bot_max_positive_rate
+        ),
         "live_logit_mode": "regime",
         "live_regime_enabled": True,
         "live_regime_threshold": float(payload["regime_threshold"]),
         "live_human_spread": list(payload["human_spread"]),
         "live_bot_spread": list(payload["bot_spread"]),
-        "live_score_ceiling": float(hard_ceiling) if hard_ceiling is not None else 0.49,
+        "live_score_ceiling": float(human_hard_ceiling) if human_hard_ceiling is not None else 0.49,
+        "live_human_score_ceiling": float(human_hard_ceiling) if human_hard_ceiling is not None else 0.49,
+        "live_bot_score_ceiling": float(bot_hard_ceiling) if bot_hard_ceiling is not None else 0.58,
         "score_logit_bias": 2.2,
         "score_logit_temperature": 0.55,
         "score_remap": {},

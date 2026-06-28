@@ -152,6 +152,32 @@ TRAIN_PROFILES: dict[str, dict[str, Any]] = {
             (0.14, 0.48),
         ),
     },
+    "v8": {
+        "model_version": "reference-dualbranch-v8-reward-recall",
+        "training_objective": "dual_branch_v8_reward_recall_regime",
+        "reward_first": True,
+        "max_fpr": 0.005,
+        "max_positive_rate": 0.05,
+        "live_human_max_positive_rate": 0.0,
+        "live_bot_max_positive_rate": 0.18,
+        "live_human_score_ceiling": 0.49,
+        "live_bot_score_ceiling": 0.58,
+        "spread_blend": 0.94,
+        "live_augment_default": False,
+        "benchmark_only_selection": True,
+        "live_score_ceiling": 0.49,
+        "hybrid_isolation": True,
+        "regime_calibration": True,
+        "holdout_dates": 7,
+        "min_bot_recall": 0.25,
+        "center_blends": (0.0,),
+        "spread_bounds": (
+            (None, None),
+            (0.10, 0.42),
+            (0.12, 0.45),
+            (0.14, 0.48),
+        ),
+    },
 }
 
 
@@ -198,7 +224,25 @@ def _simulate_live_scores(
     settings: dict[str, Any],
     *,
     max_positive_rate: float,
+    regime_overrides: dict[str, Any] | None = None,
 ) -> np.ndarray:
+    regime_overrides = regime_overrides or {}
+    human_rate = settings.get(
+        "live_human_max_positive_rate",
+        regime_overrides.get("live_human_max_positive_rate"),
+    )
+    bot_rate = settings.get(
+        "live_bot_max_positive_rate",
+        regime_overrides.get("live_bot_max_positive_rate"),
+    )
+    human_ceiling = settings.get(
+        "live_human_score_ceiling",
+        regime_overrides.get("live_human_score_ceiling", settings.get("live_score_ceiling", 0.49)),
+    )
+    bot_ceiling = settings.get(
+        "live_bot_score_ceiling",
+        regime_overrides.get("live_bot_score_ceiling", 0.58),
+    )
     return simulate_live_miner_scores(
         scores,
         bias=float(settings.get("score_logit_bias", 2.2) or 2.2),
@@ -208,9 +252,13 @@ def _simulate_live_scores(
         spread_low=settings.get("live_batch_spread_low"),
         spread_high=settings.get("live_batch_spread_high"),
         max_positive_rate=max_positive_rate,
+        human_max_positive_rate=float(human_rate) if human_rate is not None else None,
+        bot_max_positive_rate=float(bot_rate) if bot_rate is not None else None,
         logit_mode=str(settings.get("live_logit_mode", "adaptive") or "adaptive"),
         target_median=float(settings.get("live_logit_target_median", 0.24) or 0.24),
         hard_ceiling=settings.get("live_score_ceiling", 0.49),
+        human_hard_ceiling=float(human_ceiling) if human_ceiling is not None else None,
+        bot_hard_ceiling=float(bot_ceiling) if bot_ceiling is not None else None,
         regime_enabled=bool(settings.get("live_regime_enabled", False)),
         regime_threshold=float(settings.get("live_regime_threshold", 0.35) or 0.35),
         human_spread=tuple(settings.get("live_human_spread") or (0.04, 0.16)),
@@ -267,15 +315,26 @@ def sweep_blend(
     iso_scores: np.ndarray | None = None,
     use_regime: bool = False,
     fixed_regime: dict[str, Any] | None = None,
+    regime_overrides: dict[str, Any] | None = None,
+    reward_first: bool = RANK_FIRST,
+    min_bot_recall: float = 0.25,
 ) -> tuple[float, dict[str, Any], dict[str, Any], np.ndarray]:
     calibration_kwargs = calibration_kwargs or {}
-    best_alpha = 0.20 if RANK_FIRST else 0.75
+    regime_overrides = regime_overrides or {}
+    best_alpha = 0.20 if reward_first is False else 0.75
     best_metrics: dict[str, Any] = {}
     best_settings: dict[str, Any] = {}
     best_scores = abs_oof
     best_selection = (-1.0, -1.0, -1.0, -1.0)
 
-    alpha_values = np.linspace(0.10, 0.30, 9) if RANK_FIRST else np.linspace(0.15, 0.55, 9)
+    alpha_values = np.linspace(0.10, 0.30, 9) if reward_first is False else np.linspace(0.15, 0.55, 9)
+    human_rate = regime_overrides.get("live_human_max_positive_rate")
+    bot_rate = regime_overrides.get("live_bot_max_positive_rate")
+    human_ceiling = regime_overrides.get(
+        "live_human_score_ceiling",
+        calibration_kwargs.get("hard_ceiling", 0.49),
+    )
+    bot_ceiling = regime_overrides.get("live_bot_score_ceiling", 0.58)
     for alpha in alpha_values:
         scores = alpha * abs_oof + (1.0 - alpha) * rel_oof
         if iso_scores is not None:
@@ -294,19 +353,27 @@ def sweep_blend(
                 bot_spread=bot_spread,
                 spread_blend=float(calibration_kwargs.get("spread_blend", 0.94)),
                 max_positive_rate=max_positive_rate,
+                human_max_positive_rate=float(human_rate) if human_rate is not None else None,
+                bot_max_positive_rate=float(bot_rate) if bot_rate is not None else None,
                 hard_ceiling=hard_ceiling,
+                human_hard_ceiling=float(human_ceiling) if human_ceiling is not None else None,
+                bot_hard_ceiling=float(bot_ceiling) if bot_ceiling is not None else None,
             )
             settings = {
                 "live_batch_spread": True,
                 "live_batch_spread_blend": float(calibration_kwargs.get("spread_blend", 0.94)),
                 "live_batch_center": False,
                 "live_max_positive_rate": float(max_positive_rate),
+                "live_human_max_positive_rate": float(human_rate) if human_rate is not None else 0.0,
+                "live_bot_max_positive_rate": float(bot_rate) if bot_rate is not None else max_positive_rate,
                 "live_logit_mode": "regime",
                 "live_regime_enabled": True,
                 "live_regime_threshold": threshold,
                 "live_human_spread": list(human_spread),
                 "live_bot_spread": list(bot_spread),
-                "live_score_ceiling": float(hard_ceiling) if hard_ceiling is not None else 0.49,
+                "live_score_ceiling": float(human_ceiling) if human_ceiling is not None else 0.49,
+                "live_human_score_ceiling": float(human_ceiling) if human_ceiling is not None else 0.49,
+                "live_bot_score_ceiling": float(bot_ceiling) if bot_ceiling is not None else 0.58,
                 "score_logit_temperature": 0.55,
                 "hybrid_fusion": "max",
             }
@@ -333,10 +400,16 @@ def sweep_blend(
                 y,
                 max_fpr=max_fpr,
                 max_positive_rate=max_positive_rate,
+                human_max_positive_rate=float(human_rate) if human_rate is not None else None,
+                bot_max_positive_rate=float(bot_rate) if bot_rate is not None else None,
                 groups=groups,
                 spread_blend=float(calibration_kwargs.get("spread_blend", 0.92)),
                 spearman_mask=calibration_kwargs.get("spearman_mask"),
                 hard_ceiling=calibration_kwargs.get("hard_ceiling", 0.49),
+                human_hard_ceiling=float(human_ceiling) if human_ceiling is not None else None,
+                bot_hard_ceiling=float(bot_ceiling) if bot_ceiling is not None else None,
+                reward_first=reward_first,
+                min_bot_recall=min_bot_recall,
             )
         else:
             settings, metrics = select_live_calibration(
@@ -345,18 +418,23 @@ def sweep_blend(
                 max_fpr=max_fpr,
                 max_positive_rate=max_positive_rate,
                 groups=groups,
-                rank_first=RANK_FIRST,
+                rank_first=not reward_first,
                 **calibration_kwargs,
             )
-        live = _simulate_live_scores(scores, settings, max_positive_rate=max_positive_rate)
+        live = _simulate_live_scores(
+            scores,
+            settings,
+            max_positive_rate=max_positive_rate,
+            regime_overrides=regime_overrides,
+        )
         selection = _live_selection_tuple(
             live,
             y,
             groups=groups,
             holdout_mask=holdout_mask,
-            rank_first=RANK_FIRST,
+            rank_first=not reward_first,
         )
-        batch_spearman = selection[0] if RANK_FIRST else selection[3]
+        batch_spearman = selection[0] if not reward_first else selection[3]
         print(
             f"alpha={alpha:.2f} spearman={selection[0]:.4f} cls_pen={-selection[1]:.4f} "
             f"fpr={-selection[2]:.4f} bot_recall={selection[3]:.4f} "
@@ -368,10 +446,10 @@ def sweep_blend(
             best_settings = settings
             best_metrics = metrics
             best_metrics["batch_spearman"] = batch_spearman
-            best_metrics["holdout_spearman"] = selection[0] if RANK_FIRST else batch_spearman
-            best_metrics["classification_penalty"] = float(-selection[1]) if RANK_FIRST else 0.0
+            best_metrics["holdout_spearman"] = selection[0] if not reward_first else batch_spearman
+            best_metrics["classification_penalty"] = float(-selection[1]) if not reward_first else 0.0
             best_metrics["holdout_reward"] = float(metrics.get("reward", 0.0))
-            best_metrics["bot_recall"] = selection[3] if RANK_FIRST else selection[2]
+            best_metrics["bot_recall"] = selection[3] if not reward_first else selection[2]
             best_scores = scores
     return best_alpha, best_settings, best_metrics, best_scores
 
@@ -669,6 +747,9 @@ def main() -> None:
     os.environ.setdefault("MKL_NUM_THREADS", "1")
 
     profile = TRAIN_PROFILES[args.profile]
+    global RANK_FIRST
+    reward_first_flag = bool(profile.get("reward_first", False))
+    RANK_FIRST = not reward_first_flag
     if args.max_fpr is None:
         args.max_fpr = float(profile["max_fpr"])
     if args.max_positive_rate is None:
@@ -688,6 +769,17 @@ def main() -> None:
         calibration_kwargs["spread_bounds"] = tuple(profile["spread_bounds"])
     if "live_score_ceiling" in profile:
         calibration_kwargs["hard_ceiling"] = float(profile["live_score_ceiling"])
+    regime_overrides = {
+        key: profile[key]
+        for key in (
+            "live_human_max_positive_rate",
+            "live_bot_max_positive_rate",
+            "live_human_score_ceiling",
+            "live_bot_score_ceiling",
+        )
+        if key in profile
+    }
+    min_bot_recall = float(profile.get("min_bot_recall", 0.25))
     selection_holdout_mask: np.ndarray | None = None
     spearman_eval_mask: np.ndarray | None = None
     pseudo_weight = float(args.pseudo_weight)
@@ -829,6 +921,9 @@ def main() -> None:
         iso_scores=iso_scores,
         use_regime=bool(profile.get("regime_calibration", False)),
         fixed_regime=fixed_regime,
+        regime_overrides=regime_overrides,
+        reward_first=reward_first_flag,
+        min_bot_recall=min_bot_recall,
     )
 
     rank_boost, rank_metrics = sweep_rank_boost(

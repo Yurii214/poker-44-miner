@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Tuple
 
 import bittensor as bt
+import numpy as np
 
 from poker44.base.miner import BaseMinerNeuron
 from poker44.utils.model_manifest import (
@@ -64,6 +65,8 @@ class Miner(BaseMinerNeuron):
             repo_root / "poker44_ml" / "stacked.py",
             repo_root / "poker44_ml" / "rank_stack.py",
             repo_root / "poker44_ml" / "calibration.py",
+            repo_root / "poker44_ml" / "consistency_features.py",
+            repo_root / "poker44_ml" / "anomaly_branch.py",
         ]
         repo_url = os.getenv(
             "POKER44_MODEL_REPO_URL",
@@ -138,14 +141,51 @@ class Miner(BaseMinerNeuron):
             f"miner_doc={repo_root / 'docs' / 'miner.md'}"
         )
 
-    def _apply_live_positive_cap(self, scores: list[float]) -> list[float]:
+    def _apply_live_positive_cap(
+        self,
+        scores: list[float],
+        hybrid_raw: list[float] | None = None,
+    ) -> list[float]:
         """Keep live batches under the human-safety cliff while preserving order."""
         if not scores:
             return scores
-        hard_ceiling = float(
-            self.detector.metadata.get("live_score_ceiling", 0.49) or 0.49
+        metadata = self.detector.metadata
+        regime_threshold = float(
+            metadata.get("live_regime_threshold", 0.35) or 0.35
         )
-        max_positive = int(len(scores) * self.max_positive_rate)
+        prior = float(np.mean(hybrid_raw)) if hybrid_raw else 0.0
+        is_bot_batch = bool(
+            self.detector.live_regime_enabled
+            and hybrid_raw
+            and prior >= regime_threshold
+        )
+        if is_bot_batch:
+            hard_ceiling = float(
+                metadata.get("live_bot_score_ceiling", 0.58) or 0.58
+            )
+            max_rate = float(
+                metadata.get(
+                    "live_bot_max_positive_rate",
+                    metadata.get("live_max_positive_rate", self.max_positive_rate),
+                )
+                or self.max_positive_rate
+            )
+        else:
+            hard_ceiling = float(
+                metadata.get(
+                    "live_human_score_ceiling",
+                    metadata.get("live_score_ceiling", 0.49),
+                )
+                or 0.49
+            )
+            max_rate = float(
+                metadata.get(
+                    "live_human_max_positive_rate",
+                    metadata.get("live_max_positive_rate", self.max_positive_rate),
+                )
+                or self.max_positive_rate
+            )
+        max_positive = int(len(scores) * max_rate)
         positive_count = sum(score >= 0.5 for score in scores)
         capped_scores = list(scores)
         cutoff_val = 0.0
@@ -164,9 +204,10 @@ class Miner(BaseMinerNeuron):
                 ]
             bt.logging.warning(
                 "Applied live positive cap | "
+                f"regime={'bot' if is_bot_batch else 'human'} prior={prior:.4f} "
                 f"count={len(scores)} before={positive_count} "
                 f"after={sum(s >= 0.5 for s in capped_scores)} max_allowed={max_positive} "
-                f"rate={self.max_positive_rate:.3f} cutoff={cutoff_val:.6f}"
+                f"rate={max_rate:.3f} cutoff={cutoff_val:.6f}"
             )
         capped_scores = [
             round(max(0.0, min(hard_ceiling, score)), 6) for score in capped_scores
@@ -186,7 +227,7 @@ class Miner(BaseMinerNeuron):
             if components
             else self.detector.predict_supervised_raw_scores(chunks)
         )
-        scores = self._apply_live_positive_cap(raw_scores)
+        scores = self._apply_live_positive_cap(raw_scores, hybrid_raw)
         synapse.risk_scores = scores
         synapse.predictions = [score >= 0.5 for score in scores]
         synapse.model_manifest = dict(self.model_manifest)

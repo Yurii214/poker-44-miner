@@ -159,12 +159,31 @@ def apply_batch_adaptive_logit(
     return np.clip(1.0 / (1.0 + np.exp(-np.clip(adjusted, -40.0, 40.0))), 0.0, 1.0)
 
 
+def _resolve_score_ceiling(
+    *,
+    hard_ceiling: float | None,
+    human_hard_ceiling: float | None,
+    bot_hard_ceiling: float | None,
+    batch_regime: str | None,
+) -> float | None:
+    if batch_regime == "bot" and bot_hard_ceiling is not None:
+        return float(bot_hard_ceiling)
+    if batch_regime == "human" and human_hard_ceiling is not None:
+        return float(human_hard_ceiling)
+    if hard_ceiling is not None:
+        return float(hard_ceiling)
+    return None
+
+
 def apply_live_positive_cap(
     scores: np.ndarray,
     *,
     max_positive_rate: float = 0.10,
     score_cap_epsilon: float = 1e-6,
     hard_ceiling: float | None = 0.49,
+    human_hard_ceiling: float | None = None,
+    bot_hard_ceiling: float | None = None,
+    batch_regime: str | None = None,
 ) -> np.ndarray:
     """Mirror miner-side cap: limit hard flags at 0.5 while preserving order."""
     values = np.asarray(scores, dtype=float)
@@ -182,8 +201,13 @@ def apply_live_positive_cap(
             scale = (0.5 - score_cap_epsilon) / max(cutoff, score_cap_epsilon)
             values = np.where(values >= cutoff, values, values * scale)
             values = np.clip(values, 0.0, 1.0)
-    if hard_ceiling is not None:
-        ceiling = float(hard_ceiling)
+    ceiling = _resolve_score_ceiling(
+        hard_ceiling=hard_ceiling,
+        human_hard_ceiling=human_hard_ceiling,
+        bot_hard_ceiling=bot_hard_ceiling,
+        batch_regime=batch_regime,
+    )
+    if ceiling is not None:
         values = np.clip(values, 0.0, ceiling)
     return values
 
@@ -222,19 +246,28 @@ def simulate_regime_live_miner_scores(
     spread_blend: float = 0.92,
     batch_size: int = 40,
     max_positive_rate: float = 0.02,
+    human_max_positive_rate: float | None = None,
+    bot_max_positive_rate: float | None = None,
     temperature: float = 0.55,
     hard_ceiling: float | None = 0.49,
+    human_hard_ceiling: float | None = None,
+    bot_hard_ceiling: float | None = None,
 ) -> np.ndarray:
     """Regime-aware live path: batch prior selects spread band + target median."""
     values = np.asarray(raw_scores, dtype=float)
     if values.size == 0:
         return values
     batch_size = max(1, int(batch_size))
+    human_rate = float(max_positive_rate if human_max_positive_rate is None else human_max_positive_rate)
+    bot_rate = float(max_positive_rate if bot_max_positive_rate is None else bot_max_positive_rate)
+    if human_hard_ceiling is None and hard_ceiling is not None:
+        human_hard_ceiling = float(hard_ceiling)
     output = np.zeros_like(values)
     for start in range(0, len(values), batch_size):
         stop = min(start + batch_size, len(values))
         batch_raw = values[start:stop]
         prior = float(np.mean(batch_raw))
+        is_bot_batch = prior >= float(regime_threshold)
         spread, target_median = apply_regime_batch_spread(
             batch_raw,
             batch_prior=prior,
@@ -250,8 +283,11 @@ def simulate_regime_live_miner_scores(
         )
         output[start:stop] = apply_live_positive_cap(
             calibrated,
-            max_positive_rate=max_positive_rate,
-            hard_ceiling=hard_ceiling,
+            max_positive_rate=bot_rate if is_bot_batch else human_rate,
+            hard_ceiling=None,
+            human_hard_ceiling=human_hard_ceiling,
+            bot_hard_ceiling=bot_hard_ceiling,
+            batch_regime="bot" if is_bot_batch else "human",
         )
     return output
 
@@ -270,6 +306,10 @@ def simulate_live_miner_scores(
     logit_mode: str = "fixed",
     target_median: float = 0.28,
     hard_ceiling: float | None = 0.49,
+    human_hard_ceiling: float | None = None,
+    bot_hard_ceiling: float | None = None,
+    human_max_positive_rate: float | None = None,
+    bot_max_positive_rate: float | None = None,
     regime_enabled: bool = False,
     regime_threshold: float = 0.35,
     human_spread: tuple[float, float] = (0.04, 0.16),
@@ -285,8 +325,12 @@ def simulate_live_miner_scores(
             spread_blend=spread_blend,
             batch_size=batch_size,
             max_positive_rate=max_positive_rate,
+            human_max_positive_rate=human_max_positive_rate,
+            bot_max_positive_rate=bot_max_positive_rate,
             temperature=temperature,
             hard_ceiling=hard_ceiling,
+            human_hard_ceiling=human_hard_ceiling,
+            bot_hard_ceiling=bot_hard_ceiling,
         )
     spread = simulate_live_batch_scores(
         raw_scores,
