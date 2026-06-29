@@ -146,13 +146,60 @@ class Miner(BaseMinerNeuron):
         scores: list[float],
         hybrid_raw: list[float] | None = None,
     ) -> list[float]:
-        """Keep live batches under the human-safety cliff while preserving order."""
+        """Per-chunk regime cap: humans stay below 0.5, bots may flag."""
         if not scores:
             return scores
         metadata = self.detector.metadata
         regime_threshold = float(
             metadata.get("live_regime_threshold", 0.35) or 0.35
         )
+        chunk_regime = bool(
+            metadata.get(
+                "live_chunk_regime_enabled",
+                metadata.get("live_regime_enabled", False),
+            )
+        )
+        human_ceiling = float(
+            metadata.get(
+                "live_human_score_ceiling",
+                metadata.get("live_score_ceiling", 0.49),
+            )
+            or 0.49
+        )
+        bot_ceiling = float(metadata.get("live_bot_score_ceiling", 0.58) or 0.58)
+        human_rate = float(
+            metadata.get("live_human_max_positive_rate", 0.0) or 0.0
+        )
+        bot_rate = float(
+            metadata.get(
+                "live_bot_max_positive_rate",
+                metadata.get("live_max_positive_rate", self.max_positive_rate),
+            )
+            or self.max_positive_rate
+        )
+        capped_scores = list(scores)
+        if chunk_regime and hybrid_raw and len(hybrid_raw) == len(scores):
+            from poker44_ml.calibration import apply_live_positive_cap
+
+            output = np.asarray(scores, dtype=float)
+            regime = np.asarray(hybrid_raw, dtype=float)
+            human_mask = regime < regime_threshold
+            bot_mask = ~human_mask
+            for mask, rate, ceiling, batch_regime in (
+                (human_mask, human_rate, human_ceiling, "human"),
+                (bot_mask, bot_rate, bot_ceiling, "bot"),
+            ):
+                if not bool(mask.any()):
+                    continue
+                output[mask] = apply_live_positive_cap(
+                    output[mask],
+                    max_positive_rate=rate,
+                    human_hard_ceiling=ceiling if batch_regime == "human" else None,
+                    bot_hard_ceiling=ceiling if batch_regime == "bot" else None,
+                    batch_regime=batch_regime,
+                )
+            return [round(float(value), 6) for value in output]
+
         prior = float(np.mean(hybrid_raw)) if hybrid_raw else 0.0
         is_bot_batch = bool(
             self.detector.live_regime_enabled
@@ -160,34 +207,13 @@ class Miner(BaseMinerNeuron):
             and prior >= regime_threshold
         )
         if is_bot_batch:
-            hard_ceiling = float(
-                metadata.get("live_bot_score_ceiling", 0.58) or 0.58
-            )
-            max_rate = float(
-                metadata.get(
-                    "live_bot_max_positive_rate",
-                    metadata.get("live_max_positive_rate", self.max_positive_rate),
-                )
-                or self.max_positive_rate
-            )
+            hard_ceiling = bot_ceiling
+            max_rate = bot_rate
         else:
-            hard_ceiling = float(
-                metadata.get(
-                    "live_human_score_ceiling",
-                    metadata.get("live_score_ceiling", 0.49),
-                )
-                or 0.49
-            )
-            max_rate = float(
-                metadata.get(
-                    "live_human_max_positive_rate",
-                    metadata.get("live_max_positive_rate", self.max_positive_rate),
-                )
-                or self.max_positive_rate
-            )
+            hard_ceiling = human_ceiling
+            max_rate = human_rate
         max_positive = int(len(scores) * max_rate)
         positive_count = sum(score >= 0.5 for score in scores)
-        capped_scores = list(scores)
         cutoff_val = 0.0
         if positive_count > max_positive:
             sorted_scores = sorted(scores, reverse=True)
@@ -197,7 +223,8 @@ class Miner(BaseMinerNeuron):
                 capped_scores = [score * scale for score in scores]
             else:
                 cutoff_val = sorted_scores[max_positive - 1]
-                scale = (0.5 - SCORE_CAP_EPSILON) / max(cutoff_val, SCORE_CAP_EPSILON)
+                target_top = min(hard_ceiling, max(cutoff_val, 0.5 - SCORE_CAP_EPSILON))
+                scale = target_top / max(cutoff_val, SCORE_CAP_EPSILON)
                 capped_scores = [
                     score if score >= cutoff_val else score * scale
                     for score in scores

@@ -23,7 +23,7 @@ if str(REPO_ROOT) not in sys.path:
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 from poker44.score.scoring import reward
-from poker44_ml.calibration import simulate_live_miner_scores
+from poker44_ml.calibration import simulate_live_miner_scores, simulate_regime_live_miner_scores
 from poker44_ml.innovative_model import (
     DualBranchBatchAwareModel,
     transform_batch_relative_rows,
@@ -178,6 +178,34 @@ TRAIN_PROFILES: dict[str, dict[str, Any]] = {
             (0.14, 0.48),
         ),
     },
+    "v9": {
+        "model_version": "reference-dualbranch-v9-chunk-regime",
+        "training_objective": "dual_branch_v9_chunk_regime_live80",
+        "reward_first": True,
+        "max_fpr": 0.005,
+        "max_positive_rate": 0.05,
+        "live_human_max_positive_rate": 0.0,
+        "live_bot_max_positive_rate": 0.15,
+        "live_human_score_ceiling": 0.49,
+        "live_bot_score_ceiling": 0.58,
+        "spread_blend": 0.94,
+        "live_augment_default": False,
+        "benchmark_only_selection": True,
+        "live_score_ceiling": 0.49,
+        "hybrid_isolation": True,
+        "regime_calibration": True,
+        "chunk_regime": True,
+        "live_batch_size": 80,
+        "holdout_dates": 7,
+        "min_bot_recall": 0.30,
+        "center_blends": (0.0,),
+        "spread_bounds": (
+            (None, None),
+            (0.10, 0.42),
+            (0.12, 0.45),
+            (0.14, 0.48),
+        ),
+    },
 }
 
 
@@ -225,6 +253,8 @@ def _simulate_live_scores(
     *,
     max_positive_rate: float,
     regime_overrides: dict[str, Any] | None = None,
+    regime_scores: np.ndarray | None = None,
+    live_batch_size: int = 80,
 ) -> np.ndarray:
     regime_overrides = regime_overrides or {}
     human_rate = settings.get(
@@ -243,6 +273,25 @@ def _simulate_live_scores(
         "live_bot_score_ceiling",
         regime_overrides.get("live_bot_score_ceiling", 0.58),
     )
+    chunk_regime = bool(settings.get("live_chunk_regime_enabled", True))
+    if chunk_regime and bool(settings.get("live_regime_enabled", False)):
+        return simulate_regime_live_miner_scores(
+            scores,
+            regime_threshold=float(settings.get("live_regime_threshold", 0.35) or 0.35),
+            human_spread=tuple(settings.get("live_human_spread") or (0.04, 0.16)),
+            bot_spread=tuple(settings.get("live_bot_spread") or (0.22, 0.48)),
+            spread_blend=float(settings.get("live_batch_spread_blend", 0.70) or 0.70),
+            batch_size=live_batch_size,
+            max_positive_rate=max_positive_rate,
+            human_max_positive_rate=float(human_rate) if human_rate is not None else None,
+            bot_max_positive_rate=float(bot_rate) if bot_rate is not None else None,
+            temperature=float(settings.get("score_logit_temperature", 0.55) or 0.55),
+            hard_ceiling=settings.get("live_score_ceiling", 0.49),
+            human_hard_ceiling=float(human_ceiling) if human_ceiling is not None else None,
+            bot_hard_ceiling=float(bot_ceiling) if bot_ceiling is not None else None,
+            regime_scores=regime_scores if regime_scores is not None else scores,
+            chunk_regime=True,
+        )
     return simulate_live_miner_scores(
         scores,
         bias=float(settings.get("score_logit_bias", 2.2) or 2.2),
@@ -318,6 +367,9 @@ def sweep_blend(
     regime_overrides: dict[str, Any] | None = None,
     reward_first: bool = RANK_FIRST,
     min_bot_recall: float = 0.25,
+    supervised_oof: np.ndarray | None = None,
+    chunk_regime: bool = True,
+    live_batch_size: int = 80,
 ) -> tuple[float, dict[str, Any], dict[str, Any], np.ndarray]:
     calibration_kwargs = calibration_kwargs or {}
     regime_overrides = regime_overrides or {}
@@ -325,6 +377,7 @@ def sweep_blend(
     best_metrics: dict[str, Any] = {}
     best_settings: dict[str, Any] = {}
     best_scores = abs_oof
+    best_supervised = abs_oof
     best_selection = (-1.0, -1.0, -1.0, -1.0)
 
     alpha_values = np.linspace(0.10, 0.30, 9) if reward_first is False else np.linspace(0.15, 0.55, 9)
@@ -336,7 +389,8 @@ def sweep_blend(
     )
     bot_ceiling = regime_overrides.get("live_bot_score_ceiling", 0.58)
     for alpha in alpha_values:
-        scores = alpha * abs_oof + (1.0 - alpha) * rel_oof
+        supervised = alpha * abs_oof + (1.0 - alpha) * rel_oof
+        scores = supervised
         if iso_scores is not None:
             scores = fuse_hybrid_scores(scores, iso_scores, mode="max")
         if use_regime and fixed_regime is not None:
@@ -352,12 +406,15 @@ def sweep_blend(
                 human_spread=human_spread,
                 bot_spread=bot_spread,
                 spread_blend=float(calibration_kwargs.get("spread_blend", 0.94)),
+                batch_size=live_batch_size,
                 max_positive_rate=max_positive_rate,
                 human_max_positive_rate=float(human_rate) if human_rate is not None else None,
                 bot_max_positive_rate=float(bot_rate) if bot_rate is not None else None,
                 hard_ceiling=hard_ceiling,
                 human_hard_ceiling=float(human_ceiling) if human_ceiling is not None else None,
                 bot_hard_ceiling=float(bot_ceiling) if bot_ceiling is not None else None,
+                regime_scores=supervised,
+                chunk_regime=chunk_regime,
             )
             settings = {
                 "live_batch_spread": True,
@@ -368,6 +425,7 @@ def sweep_blend(
                 "live_bot_max_positive_rate": float(bot_rate) if bot_rate is not None else max_positive_rate,
                 "live_logit_mode": "regime",
                 "live_regime_enabled": True,
+                "live_chunk_regime_enabled": bool(chunk_regime),
                 "live_regime_threshold": threshold,
                 "live_human_spread": list(human_spread),
                 "live_bot_spread": list(bot_spread),
@@ -403,6 +461,7 @@ def sweep_blend(
                 human_max_positive_rate=float(human_rate) if human_rate is not None else None,
                 bot_max_positive_rate=float(bot_rate) if bot_rate is not None else None,
                 groups=groups,
+                batch_size=live_batch_size,
                 spread_blend=float(calibration_kwargs.get("spread_blend", 0.92)),
                 spearman_mask=calibration_kwargs.get("spearman_mask"),
                 hard_ceiling=calibration_kwargs.get("hard_ceiling", 0.49),
@@ -410,6 +469,8 @@ def sweep_blend(
                 bot_hard_ceiling=float(bot_ceiling) if bot_ceiling is not None else None,
                 reward_first=reward_first,
                 min_bot_recall=min_bot_recall,
+                regime_scores=supervised,
+                chunk_regime=chunk_regime,
             )
         else:
             settings, metrics = select_live_calibration(
@@ -426,6 +487,8 @@ def sweep_blend(
             settings,
             max_positive_rate=max_positive_rate,
             regime_overrides=regime_overrides,
+            regime_scores=supervised,
+            live_batch_size=live_batch_size,
         )
         selection = _live_selection_tuple(
             live,
@@ -451,7 +514,8 @@ def sweep_blend(
             best_metrics["holdout_reward"] = float(metrics.get("reward", 0.0))
             best_metrics["bot_recall"] = selection[3] if not reward_first else selection[2]
             best_scores = scores
-    return best_alpha, best_settings, best_metrics, best_scores
+            best_supervised = supervised
+    return best_alpha, best_settings, best_metrics, best_scores, best_supervised
 
 
 def batch_groups_from_metadata(metadata: list[dict[str, Any]]) -> np.ndarray:
@@ -523,6 +587,8 @@ def sweep_rank_boost(
     live_settings: dict[str, Any],
     max_positive_rate: float,
     holdout_mask: np.ndarray | None = None,
+    regime_scores: np.ndarray | None = None,
+    live_batch_size: int = 80,
 ) -> tuple[float, dict[str, Any]]:
     best_boost = 0.0
     best_metrics: dict[str, Any] = {}
@@ -534,6 +600,8 @@ def sweep_rank_boost(
             np.asarray(boosted, dtype=float),
             live_settings,
             max_positive_rate=max_positive_rate,
+            regime_scores=regime_scores,
+            live_batch_size=live_batch_size,
         )
         selection = _live_selection_tuple(
             live,
@@ -780,6 +848,8 @@ def main() -> None:
         if key in profile
     }
     min_bot_recall = float(profile.get("min_bot_recall", 0.25))
+    chunk_regime = bool(profile.get("chunk_regime", True))
+    live_batch_size = int(profile.get("live_batch_size", 80))
     selection_holdout_mask: np.ndarray | None = None
     spearman_eval_mask: np.ndarray | None = None
     pseudo_weight = float(args.pseudo_weight)
@@ -909,7 +979,7 @@ def main() -> None:
             f"iso_mean={float(iso_scores.mean()):.4f} iso_max={float(iso_scores.max()):.4f}"
         )
 
-    alpha, live_settings, live_metrics, blended_oof = sweep_blend(
+    alpha, live_settings, live_metrics, blended_oof, supervised_oof = sweep_blend(
         abs_oof,
         rel_oof,
         y,
@@ -924,6 +994,8 @@ def main() -> None:
         regime_overrides=regime_overrides,
         reward_first=reward_first_flag,
         min_bot_recall=min_bot_recall,
+        chunk_regime=chunk_regime,
+        live_batch_size=live_batch_size,
     )
 
     rank_boost, rank_metrics = sweep_rank_boost(
@@ -934,6 +1006,8 @@ def main() -> None:
         live_settings=live_settings,
         max_positive_rate=args.max_positive_rate,
         holdout_mask=selection_holdout_mask if selection_holdout_mask is not None else holdout_mask,
+        regime_scores=supervised_oof,
+        live_batch_size=live_batch_size,
     )
     live_settings["live_batch_rank_boost"] = rank_boost
     live_metrics["rank_boost_metrics"] = rank_metrics

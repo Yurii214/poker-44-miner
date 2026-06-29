@@ -516,18 +516,18 @@ def select_regime_calibration(
     bot_hard_ceiling: float | None = None,
     reward_first: bool = False,
     min_bot_recall: float = 0.25,
+    regime_scores: np.ndarray | None = None,
+    chunk_regime: bool = True,
 ) -> tuple[dict[str, float | str | bool | list[float]], dict[str, Any]]:
     from poker44_ml.calibration import simulate_regime_live_miner_scores
 
-    thresholds = (0.22, 0.26, 0.30, 0.34, 0.38, 0.42)
+    thresholds = (0.32, 0.36, 0.40, 0.44, 0.48)
     human_spreads = ((0.03, 0.14), (0.04, 0.16), (0.05, 0.18))
     bot_spreads = (
-        (0.20, 0.45),
-        (0.22, 0.48),
-        (0.24, 0.52),
-        (0.26, 0.55),
-        (0.28, 0.58),
-        (0.30, 0.62),
+        (0.22, 0.50),
+        (0.24, 0.54),
+        (0.26, 0.58),
+        (0.28, 0.62),
     )
     if human_hard_ceiling is None and hard_ceiling is not None:
         human_hard_ceiling = float(hard_ceiling)
@@ -552,6 +552,8 @@ def select_regime_calibration(
                     hard_ceiling=hard_ceiling,
                     human_hard_ceiling=human_hard_ceiling,
                     bot_hard_ceiling=bot_hard_ceiling,
+                    regime_scores=regime_scores,
+                    chunk_regime=chunk_regime,
                 )
                 rew, meta = reward(live_scores, labels)
                 batch_spearman = 0.0
@@ -631,6 +633,7 @@ def select_regime_calibration(
         ),
         "live_logit_mode": "regime",
         "live_regime_enabled": True,
+        "live_chunk_regime_enabled": bool(chunk_regime),
         "live_regime_threshold": float(payload["regime_threshold"]),
         "live_human_spread": list(payload["human_spread"]),
         "live_bot_spread": list(payload["bot_spread"]),

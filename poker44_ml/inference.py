@@ -111,6 +111,12 @@ class Poker44Model:
             self.metadata.get("live_score_ceiling", 0.49) or 0.49
         )
         self.live_regime_enabled = bool(self.metadata.get("live_regime_enabled", False))
+        self.live_chunk_regime_enabled = bool(
+            self.metadata.get(
+                "live_chunk_regime_enabled",
+                self.metadata.get("live_regime_enabled", False),
+            )
+        )
         self.live_regime_threshold = float(
             self.metadata.get("live_regime_threshold", 0.35) or 0.35
         )
@@ -241,6 +247,41 @@ class Poker44Model:
                 blend=self.live_batch_center_blend,
             )
         if self.live_regime_enabled and raw_scores is not None:
+            if self.live_chunk_regime_enabled:
+                from poker44_ml.calibration import apply_chunk_regime_live_scores
+
+                spread = apply_chunk_regime_live_scores(
+                    values,
+                    np.asarray(raw_scores, dtype=float),
+                    regime_threshold=self.live_regime_threshold,
+                    human_spread=self.live_human_spread,
+                    bot_spread=self.live_bot_spread,
+                    spread_blend=self.live_batch_spread_blend,
+                    temperature=self.score_logit_temperature,
+                    human_max_positive_rate=float(
+                        self.metadata.get("live_human_max_positive_rate", 0.0) or 0.0
+                    ),
+                    bot_max_positive_rate=float(
+                        self.metadata.get(
+                            "live_bot_max_positive_rate",
+                            self.metadata.get("live_max_positive_rate", 0.10),
+                        )
+                        or 0.10
+                    ),
+                    human_hard_ceiling=float(
+                        self.metadata.get(
+                            "live_human_score_ceiling",
+                            self.metadata.get("live_score_ceiling", 0.49),
+                        )
+                        or 0.49
+                    ),
+                    bot_hard_ceiling=float(
+                        self.metadata.get("live_bot_score_ceiling", 0.58) or 0.58
+                    ),
+                    apply_positive_cap=False,
+                )
+                self._regime_target_median = self.live_logit_target_median
+                return [self._clamp01(float(value)) for value in spread]
             from poker44_ml.calibration import apply_regime_batch_spread
 
             prior = float(np.mean(raw_scores))
@@ -379,6 +420,8 @@ class Poker44Model:
             raw_scores=supervised_raw,
         )
         remapped_scores = self._apply_score_remap(spread_scores)
+        if self.live_regime_enabled and self.live_chunk_regime_enabled:
+            return [round(self._clamp01(value), 6) for value in remapped_scores]
         logit_scores = self._apply_score_logit(remapped_scores)
         return [round(self._clamp01(value), 6) for value in logit_scores]
 

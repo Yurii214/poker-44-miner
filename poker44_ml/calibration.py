@@ -198,7 +198,14 @@ def apply_live_positive_cap(
             values = np.clip(values * scale, 0.0, 0.5 - score_cap_epsilon)
         else:
             cutoff = float(sorted_scores[max_positive - 1])
-            scale = (0.5 - score_cap_epsilon) / max(cutoff, score_cap_epsilon)
+            ceiling = _resolve_score_ceiling(
+                hard_ceiling=hard_ceiling,
+                human_hard_ceiling=human_hard_ceiling,
+                bot_hard_ceiling=bot_hard_ceiling,
+                batch_regime=batch_regime,
+            )
+            target_top = float(ceiling) if ceiling is not None else (0.5 - score_cap_epsilon)
+            scale = target_top / max(cutoff, score_cap_epsilon)
             values = np.where(values >= cutoff, values, values * scale)
             values = np.clip(values, 0.0, 1.0)
     ceiling = _resolve_score_ceiling(
@@ -237,6 +244,67 @@ def apply_regime_batch_spread(
     return spread, target_median
 
 
+def _regime_target_median(spread: tuple[float, float], *, bot_like: bool) -> float:
+    low, high = spread
+    if bot_like:
+        return float(low + (high - low) * 0.55)
+    return float(low + (high - low) * 0.35)
+
+
+def apply_chunk_regime_live_scores(
+    model_scores: np.ndarray,
+    regime_scores: np.ndarray,
+    *,
+    regime_threshold: float,
+    human_spread: tuple[float, float],
+    bot_spread: tuple[float, float],
+    spread_blend: float = 0.92,
+    temperature: float = 0.55,
+    human_max_positive_rate: float = 0.0,
+    bot_max_positive_rate: float = 0.15,
+    human_hard_ceiling: float | None = 0.49,
+    bot_hard_ceiling: float | None = 0.58,
+    apply_positive_cap: bool = True,
+) -> np.ndarray:
+    """Per-chunk regime: human-like chunks stay low, bot-like chunks can reach >=0.5."""
+    values = np.asarray(model_scores, dtype=float)
+    regime = np.asarray(regime_scores, dtype=float)
+    if values.size == 0:
+        return values
+    output = np.zeros_like(values)
+    human_mask = regime < float(regime_threshold)
+    bot_mask = ~human_mask
+    for mask, spread, bot_like, rate, ceiling, batch_regime in (
+        (human_mask, human_spread, False, human_max_positive_rate, human_hard_ceiling, "human"),
+        (bot_mask, bot_spread, True, bot_max_positive_rate, bot_hard_ceiling, "bot"),
+    ):
+        if not bool(mask.any()):
+            continue
+        subset = values[mask]
+        spread_vals = apply_batch_quantile_spread(
+            subset,
+            blend=spread_blend,
+            spread_low=float(spread[0]),
+            spread_high=float(spread[1]),
+        )
+        calibrated = apply_batch_adaptive_logit(
+            spread_vals,
+            target_median=_regime_target_median(spread, bot_like=bot_like),
+            temperature=temperature,
+        )
+        if apply_positive_cap:
+            calibrated = apply_live_positive_cap(
+                calibrated,
+                max_positive_rate=float(rate),
+                hard_ceiling=None,
+                human_hard_ceiling=human_hard_ceiling if batch_regime == "human" else None,
+                bot_hard_ceiling=bot_hard_ceiling if batch_regime == "bot" else None,
+                batch_regime=batch_regime,
+            )
+        output[mask] = calibrated
+    return output
+
+
 def simulate_regime_live_miner_scores(
     raw_scores: np.ndarray,
     *,
@@ -252,8 +320,10 @@ def simulate_regime_live_miner_scores(
     hard_ceiling: float | None = 0.49,
     human_hard_ceiling: float | None = None,
     bot_hard_ceiling: float | None = None,
+    regime_scores: np.ndarray | None = None,
+    chunk_regime: bool = True,
 ) -> np.ndarray:
-    """Regime-aware live path: batch prior selects spread band + target median."""
+    """Regime-aware live path with optional per-chunk regime from supervised scores."""
     values = np.asarray(raw_scores, dtype=float)
     if values.size == 0:
         return values
@@ -262,14 +332,34 @@ def simulate_regime_live_miner_scores(
     bot_rate = float(max_positive_rate if bot_max_positive_rate is None else bot_max_positive_rate)
     if human_hard_ceiling is None and hard_ceiling is not None:
         human_hard_ceiling = float(hard_ceiling)
+    if bot_hard_ceiling is None:
+        bot_hard_ceiling = 0.58
+    regime = np.asarray(regime_scores if regime_scores is not None else values, dtype=float)
     output = np.zeros_like(values)
     for start in range(0, len(values), batch_size):
         stop = min(start + batch_size, len(values))
-        batch_raw = values[start:stop]
-        prior = float(np.mean(batch_raw))
+        batch_scores = values[start:stop]
+        batch_regime = regime[start:stop]
+        if chunk_regime:
+            output[start:stop] = apply_chunk_regime_live_scores(
+                batch_scores,
+                batch_regime,
+                regime_threshold=regime_threshold,
+                human_spread=tuple(human_spread),
+                bot_spread=tuple(bot_spread),
+                spread_blend=spread_blend,
+                temperature=temperature,
+                human_max_positive_rate=human_rate,
+                bot_max_positive_rate=bot_rate,
+                human_hard_ceiling=human_hard_ceiling,
+                bot_hard_ceiling=bot_hard_ceiling,
+                apply_positive_cap=True,
+            )
+            continue
+        prior = float(np.mean(batch_regime))
         is_bot_batch = prior >= float(regime_threshold)
         spread, target_median = apply_regime_batch_spread(
-            batch_raw,
+            batch_scores,
             batch_prior=prior,
             regime_threshold=regime_threshold,
             human_spread=human_spread,
