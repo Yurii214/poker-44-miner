@@ -206,6 +206,36 @@ TRAIN_PROFILES: dict[str, dict[str, Any]] = {
             (0.14, 0.48),
         ),
     },
+    "v10": {
+        "model_version": "reference-dualbranch-v10-holdout-recall",
+        "training_objective": "dual_branch_v10_holdout_gated_recall",
+        "reward_first": True,
+        "holdout_gated_selection": True,
+        "extended_regime_grid": True,
+        "max_fpr": 0.005,
+        "max_positive_rate": 0.05,
+        "live_human_max_positive_rate": 0.0,
+        "live_bot_max_positive_rate": 0.22,
+        "live_human_score_ceiling": 0.49,
+        "live_bot_score_ceiling": 0.62,
+        "spread_blend": 0.94,
+        "live_augment_default": False,
+        "benchmark_only_selection": True,
+        "live_score_ceiling": 0.49,
+        "hybrid_isolation": True,
+        "regime_calibration": True,
+        "chunk_regime": True,
+        "live_batch_size": 80,
+        "holdout_dates": 7,
+        "min_bot_recall": 0.35,
+        "center_blends": (0.0,),
+        "spread_bounds": (
+            (None, None),
+            (0.10, 0.42),
+            (0.12, 0.45),
+            (0.14, 0.48),
+        ),
+    },
 }
 
 
@@ -370,7 +400,9 @@ def sweep_blend(
     supervised_oof: np.ndarray | None = None,
     chunk_regime: bool = True,
     live_batch_size: int = 80,
-) -> tuple[float, dict[str, Any], dict[str, Any], np.ndarray]:
+    selection_holdout_mask: np.ndarray | None = None,
+    extended_regime_grid: bool = False,
+) -> tuple[float, dict[str, Any], dict[str, Any], np.ndarray, np.ndarray]:
     calibration_kwargs = calibration_kwargs or {}
     regime_overrides = regime_overrides or {}
     best_alpha = 0.20 if reward_first is False else 0.75
@@ -471,6 +503,8 @@ def sweep_blend(
                 min_bot_recall=min_bot_recall,
                 regime_scores=supervised,
                 chunk_regime=chunk_regime,
+                holdout_mask=selection_holdout_mask,
+                extended_grid=extended_regime_grid,
             )
         else:
             settings, metrics = select_live_calibration(
@@ -850,6 +884,7 @@ def main() -> None:
     min_bot_recall = float(profile.get("min_bot_recall", 0.25))
     chunk_regime = bool(profile.get("chunk_regime", True))
     live_batch_size = int(profile.get("live_batch_size", 80))
+    extended_regime_grid = bool(profile.get("extended_regime_grid", False))
     selection_holdout_mask: np.ndarray | None = None
     spearman_eval_mask: np.ndarray | None = None
     pseudo_weight = float(args.pseudo_weight)
@@ -996,6 +1031,8 @@ def main() -> None:
         min_bot_recall=min_bot_recall,
         chunk_regime=chunk_regime,
         live_batch_size=live_batch_size,
+        selection_holdout_mask=selection_holdout_mask,
+        extended_regime_grid=extended_regime_grid,
     )
 
     rank_boost, rank_metrics = sweep_rank_boost(
