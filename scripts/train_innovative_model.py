@@ -236,6 +236,39 @@ TRAIN_PROFILES: dict[str, dict[str, Any]] = {
             (0.14, 0.48),
         ),
     },
+    "v11": {
+        "model_version": "reference-dualbranch-v11-rank-regime",
+        "training_objective": "dual_branch_v11_rank_regime_dual_fpr",
+        "reward_first": True,
+        "holdout_gated_selection": True,
+        "extended_regime_grid": True,
+        "dual_fpr_selection": True,
+        "live_regime_mode": "rank",
+        "live_human_fraction": 0.35,
+        "max_fpr": 0.005,
+        "max_positive_rate": 0.05,
+        "live_human_max_positive_rate": 0.0,
+        "live_bot_max_positive_rate": 0.20,
+        "live_human_score_ceiling": 0.49,
+        "live_bot_score_ceiling": 0.62,
+        "spread_blend": 0.94,
+        "live_augment_default": False,
+        "benchmark_only_selection": True,
+        "live_score_ceiling": 0.49,
+        "hybrid_isolation": True,
+        "regime_calibration": True,
+        "chunk_regime": True,
+        "live_batch_size": 80,
+        "holdout_dates": 7,
+        "min_bot_recall": 0.38,
+        "center_blends": (0.0,),
+        "spread_bounds": (
+            (None, None),
+            (0.10, 0.42),
+            (0.12, 0.45),
+            (0.14, 0.48),
+        ),
+    },
 }
 
 
@@ -321,6 +354,8 @@ def _simulate_live_scores(
             bot_hard_ceiling=float(bot_ceiling) if bot_ceiling is not None else None,
             regime_scores=regime_scores if regime_scores is not None else scores,
             chunk_regime=True,
+            regime_mode=str(settings.get("live_regime_mode", "absolute") or "absolute"),
+            human_fraction=float(settings.get("live_human_fraction", 0.35) or 0.35),
         )
     return simulate_live_miner_scores(
         scores,
@@ -402,6 +437,9 @@ def sweep_blend(
     live_batch_size: int = 80,
     selection_holdout_mask: np.ndarray | None = None,
     extended_regime_grid: bool = False,
+    regime_mode: str = "absolute",
+    human_fraction: float = 0.35,
+    dual_fpr: bool = False,
 ) -> tuple[float, dict[str, Any], dict[str, Any], np.ndarray, np.ndarray]:
     calibration_kwargs = calibration_kwargs or {}
     regime_overrides = regime_overrides or {}
@@ -505,6 +543,9 @@ def sweep_blend(
                 chunk_regime=chunk_regime,
                 holdout_mask=selection_holdout_mask,
                 extended_grid=extended_regime_grid,
+                regime_mode=regime_mode,
+                human_fraction=human_fraction,
+                dual_fpr=dual_fpr,
             )
         else:
             settings, metrics = select_live_calibration(
@@ -885,6 +926,9 @@ def main() -> None:
     chunk_regime = bool(profile.get("chunk_regime", True))
     live_batch_size = int(profile.get("live_batch_size", 80))
     extended_regime_grid = bool(profile.get("extended_regime_grid", False))
+    regime_mode = str(profile.get("live_regime_mode", "absolute") or "absolute")
+    human_fraction = float(profile.get("live_human_fraction", 0.35) or 0.35)
+    dual_fpr = bool(profile.get("dual_fpr_selection", False))
     selection_holdout_mask: np.ndarray | None = None
     spearman_eval_mask: np.ndarray | None = None
     pseudo_weight = float(args.pseudo_weight)
@@ -1033,6 +1077,9 @@ def main() -> None:
         live_batch_size=live_batch_size,
         selection_holdout_mask=selection_holdout_mask,
         extended_regime_grid=extended_regime_grid,
+        regime_mode=regime_mode,
+        human_fraction=human_fraction,
+        dual_fpr=dual_fpr,
     )
 
     rank_boost, rank_metrics = sweep_rank_boost(

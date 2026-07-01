@@ -251,6 +251,30 @@ def _regime_target_median(spread: tuple[float, float], *, bot_like: bool) -> flo
     return float(low + (high - low) * 0.35)
 
 
+def chunk_regime_masks(
+    regime_scores: np.ndarray,
+    *,
+    regime_threshold: float,
+    regime_mode: str = "absolute",
+    human_fraction: float = 0.35,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Split a batch into human-like / bot-like chunks for dual-regime spread."""
+    regime = np.asarray(regime_scores, dtype=float)
+    if regime.size == 0:
+        empty = np.zeros(0, dtype=bool)
+        return empty, empty
+    mode = str(regime_mode or "absolute").lower()
+    if mode == "rank" and regime.size > 1:
+        order = np.argsort(regime, kind="mergesort")
+        human_count = int(max(1, round(regime.size * float(human_fraction))))
+        human_count = min(human_count, regime.size - 1)
+        human_mask = np.zeros(regime.size, dtype=bool)
+        human_mask[order[:human_count]] = True
+        return human_mask, ~human_mask
+    human_mask = regime < float(regime_threshold)
+    return human_mask, ~human_mask
+
+
 def apply_chunk_regime_live_scores(
     model_scores: np.ndarray,
     regime_scores: np.ndarray,
@@ -265,6 +289,8 @@ def apply_chunk_regime_live_scores(
     human_hard_ceiling: float | None = 0.49,
     bot_hard_ceiling: float | None = 0.58,
     apply_positive_cap: bool = True,
+    regime_mode: str = "absolute",
+    human_fraction: float = 0.35,
 ) -> np.ndarray:
     """Per-chunk regime: human-like chunks stay low, bot-like chunks can reach >=0.5."""
     values = np.asarray(model_scores, dtype=float)
@@ -272,8 +298,12 @@ def apply_chunk_regime_live_scores(
     if values.size == 0:
         return values
     output = np.zeros_like(values)
-    human_mask = regime < float(regime_threshold)
-    bot_mask = ~human_mask
+    human_mask, bot_mask = chunk_regime_masks(
+        regime,
+        regime_threshold=regime_threshold,
+        regime_mode=regime_mode,
+        human_fraction=human_fraction,
+    )
     for mask, spread, bot_like, rate, ceiling, batch_regime in (
         (human_mask, human_spread, False, human_max_positive_rate, human_hard_ceiling, "human"),
         (bot_mask, bot_spread, True, bot_max_positive_rate, bot_hard_ceiling, "bot"),
@@ -322,6 +352,8 @@ def simulate_regime_live_miner_scores(
     bot_hard_ceiling: float | None = None,
     regime_scores: np.ndarray | None = None,
     chunk_regime: bool = True,
+    regime_mode: str = "absolute",
+    human_fraction: float = 0.35,
 ) -> np.ndarray:
     """Regime-aware live path with optional per-chunk regime from supervised scores."""
     values = np.asarray(raw_scores, dtype=float)
@@ -354,6 +386,8 @@ def simulate_regime_live_miner_scores(
                 human_hard_ceiling=human_hard_ceiling,
                 bot_hard_ceiling=bot_hard_ceiling,
                 apply_positive_cap=True,
+                regime_mode=regime_mode,
+                human_fraction=human_fraction,
             )
             continue
         prior = float(np.mean(batch_regime))

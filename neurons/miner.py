@@ -159,6 +159,8 @@ class Miner(BaseMinerNeuron):
                 metadata.get("live_regime_enabled", False),
             )
         )
+        regime_mode = str(metadata.get("live_regime_mode", "absolute") or "absolute")
+        human_fraction = float(metadata.get("live_human_fraction", 0.35) or 0.35)
         human_ceiling = float(
             metadata.get(
                 "live_human_score_ceiling",
@@ -179,12 +181,16 @@ class Miner(BaseMinerNeuron):
         )
         capped_scores = list(scores)
         if chunk_regime and hybrid_raw and len(hybrid_raw) == len(scores):
-            from poker44_ml.calibration import apply_live_positive_cap
+            from poker44_ml.calibration import apply_live_positive_cap, chunk_regime_masks
 
             output = np.asarray(scores, dtype=float)
             regime = np.asarray(hybrid_raw, dtype=float)
-            human_mask = regime < regime_threshold
-            bot_mask = ~human_mask
+            human_mask, bot_mask = chunk_regime_masks(
+                regime,
+                regime_threshold=regime_threshold,
+                regime_mode=regime_mode,
+                human_fraction=human_fraction,
+            )
             for mask, rate, ceiling, batch_regime in (
                 (human_mask, human_rate, human_ceiling, "human"),
                 (bot_mask, bot_rate, bot_ceiling, "bot"),

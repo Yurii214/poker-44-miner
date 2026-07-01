@@ -117,6 +117,12 @@ class Poker44Model:
                 self.metadata.get("live_regime_enabled", False),
             )
         )
+        self.live_regime_mode = str(
+            self.metadata.get("live_regime_mode", "absolute") or "absolute"
+        )
+        self.live_human_fraction = float(
+            self.metadata.get("live_human_fraction", 0.35) or 0.35
+        )
         self.live_regime_threshold = float(
             self.metadata.get("live_regime_threshold", 0.35) or 0.35
         )
@@ -279,6 +285,8 @@ class Poker44Model:
                         self.metadata.get("live_bot_score_ceiling", 0.58) or 0.58
                     ),
                     apply_positive_cap=False,
+                    regime_mode=self.live_regime_mode,
+                    human_fraction=self.live_human_fraction,
                 )
                 self._regime_target_median = self.live_logit_target_median
                 return [self._clamp01(float(value)) for value in spread]
