@@ -523,8 +523,11 @@ def select_regime_calibration(
     regime_mode: str = "absolute",
     human_fraction: float = 0.35,
     dual_fpr: bool = False,
+    max_full_fpr: float | None = None,
 ) -> tuple[dict[str, float | str | bool | list[float]], dict[str, Any]]:
     from poker44_ml.calibration import simulate_regime_live_miner_scores
+
+    full_fpr_limit = float(max_full_fpr if max_full_fpr is not None else max_fpr)
 
     thresholds = (
         (0.28, 0.30, 0.32, 0.34, 0.36, 0.38, 0.40, 0.44)
@@ -544,9 +547,9 @@ def select_regime_calibration(
         (0.26, 0.58),
         (0.28, 0.62),
     )
-    bot_ceilings = (0.58, 0.60, 0.62) if extended_grid else (bot_hard_ceiling or 0.58,)
+    bot_ceilings = (0.58, 0.60, 0.62, 0.65, 0.68) if extended_grid else (bot_hard_ceiling or 0.58,)
     bot_rates = (
-        (0.15, 0.18, 0.20, 0.22)
+        (0.18, 0.20, 0.22, 0.24, 0.26, 0.28)
         if extended_grid and bot_max_positive_rate is not None
         else (float(bot_max_positive_rate) if bot_max_positive_rate is not None else max_positive_rate,)
     )
@@ -583,6 +586,8 @@ def select_regime_calibration(
                                     chunk_regime=chunk_regime,
                                     regime_mode=str(mode),
                                     human_fraction=float(frac),
+                                    apply_positive_cap=False,
+                                    apply_miner_cap_replay=True,
                                 )
                                 sel_mask = (
                                     holdout_mask
@@ -659,7 +664,7 @@ def select_regime_calibration(
                                     continue
                                 if cls_penalty > 0.0:
                                     continue
-                                if dual_fpr and float(full_meta.get("fpr", 1.0)) > max_fpr:
+                                if dual_fpr and float(full_meta.get("fpr", 1.0)) > full_fpr_limit:
                                     continue
                                 if dual_fpr and full_cls > 0.0:
                                     continue

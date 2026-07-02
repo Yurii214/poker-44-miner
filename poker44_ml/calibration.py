@@ -186,18 +186,21 @@ def apply_live_positive_cap(
     batch_regime: str | None = None,
 ) -> np.ndarray:
     """Mirror miner-side cap: limit hard flags at 0.5 while preserving order."""
-    values = np.asarray(scores, dtype=float)
+    values = np.asarray(scores, dtype=float).copy()
     if values.size == 0:
         return values
-    max_positive = int(values.size * max_positive_rate)
+    max_positive = int(np.floor(values.size * float(max_positive_rate) + 1e-12))
     positive_count = int((values >= 0.5).sum())
     if positive_count > max_positive:
-        sorted_scores = np.sort(values)[::-1]
+        order = np.argsort(-values, kind="stable")
         if max_positive <= 0:
-            scale = (0.5 - score_cap_epsilon) / max(float(sorted_scores[0]), score_cap_epsilon)
-            values = np.clip(values * scale, 0.0, 0.5 - score_cap_epsilon)
+            values = np.clip(values, 0.0, 0.5 - score_cap_epsilon)
         else:
-            cutoff = float(sorted_scores[max_positive - 1])
+            keep = np.zeros(values.size, dtype=bool)
+            keep[order[:max_positive]] = True
+            demote = (~keep) & (values >= 0.5)
+            values[demote] = np.minimum(values[demote], 0.5 - score_cap_epsilon)
+            cutoff = float(values[order[max_positive - 1]])
             ceiling = _resolve_score_ceiling(
                 hard_ceiling=hard_ceiling,
                 human_hard_ceiling=human_hard_ceiling,
@@ -206,7 +209,8 @@ def apply_live_positive_cap(
             )
             target_top = float(ceiling) if ceiling is not None else (0.5 - score_cap_epsilon)
             scale = target_top / max(cutoff, score_cap_epsilon)
-            values = np.where(values >= cutoff, values, values * scale)
+            sub_cutoff = (~keep) & (values < 0.5)
+            values[sub_cutoff] = np.clip(values[sub_cutoff] * scale, 0.0, 0.5 - score_cap_epsilon)
             values = np.clip(values, 0.0, 1.0)
     ceiling = _resolve_score_ceiling(
         hard_ceiling=hard_ceiling,
@@ -216,6 +220,45 @@ def apply_live_positive_cap(
     )
     if ceiling is not None:
         values = np.clip(values, 0.0, ceiling)
+    return values
+
+
+def replay_miner_positive_cap(
+    scores: np.ndarray,
+    regime_scores: np.ndarray,
+    *,
+    regime_threshold: float,
+    regime_mode: str = "absolute",
+    human_fraction: float = 0.35,
+    human_max_positive_rate: float = 0.0,
+    bot_max_positive_rate: float = 0.15,
+    human_hard_ceiling: float | None = 0.49,
+    bot_hard_ceiling: float | None = 0.58,
+) -> np.ndarray:
+    """Apply the same per-chunk cap pass as neurons/miner.py after spread+logit."""
+    values = np.asarray(scores, dtype=float).copy()
+    regime = np.asarray(regime_scores, dtype=float)
+    if values.size == 0:
+        return values
+    human_mask, bot_mask = chunk_regime_masks(
+        regime,
+        regime_threshold=regime_threshold,
+        regime_mode=regime_mode,
+        human_fraction=human_fraction,
+    )
+    for mask, rate, ceiling, batch_regime in (
+        (human_mask, human_max_positive_rate, human_hard_ceiling, "human"),
+        (bot_mask, bot_max_positive_rate, bot_hard_ceiling, "bot"),
+    ):
+        if not bool(mask.any()):
+            continue
+        values[mask] = apply_live_positive_cap(
+            values[mask],
+            max_positive_rate=float(rate),
+            human_hard_ceiling=ceiling if batch_regime == "human" else None,
+            bot_hard_ceiling=ceiling if batch_regime == "bot" else None,
+            batch_regime=batch_regime,
+        )
     return values
 
 
@@ -354,6 +397,8 @@ def simulate_regime_live_miner_scores(
     chunk_regime: bool = True,
     regime_mode: str = "absolute",
     human_fraction: float = 0.35,
+    apply_positive_cap: bool = False,
+    apply_miner_cap_replay: bool = True,
 ) -> np.ndarray:
     """Regime-aware live path with optional per-chunk regime from supervised scores."""
     values = np.asarray(raw_scores, dtype=float)
@@ -385,10 +430,22 @@ def simulate_regime_live_miner_scores(
                 bot_max_positive_rate=bot_rate,
                 human_hard_ceiling=human_hard_ceiling,
                 bot_hard_ceiling=bot_hard_ceiling,
-                apply_positive_cap=True,
+                apply_positive_cap=apply_positive_cap,
                 regime_mode=regime_mode,
                 human_fraction=human_fraction,
             )
+            if apply_miner_cap_replay and not apply_positive_cap:
+                output[start:stop] = replay_miner_positive_cap(
+                    output[start:stop],
+                    batch_regime,
+                    regime_threshold=regime_threshold,
+                    regime_mode=regime_mode,
+                    human_fraction=human_fraction,
+                    human_max_positive_rate=human_rate,
+                    bot_max_positive_rate=bot_rate,
+                    human_hard_ceiling=human_hard_ceiling,
+                    bot_hard_ceiling=bot_hard_ceiling,
+                )
             continue
         prior = float(np.mean(batch_regime))
         is_bot_batch = prior >= float(regime_threshold)

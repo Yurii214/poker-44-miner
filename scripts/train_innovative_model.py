@@ -269,6 +269,39 @@ TRAIN_PROFILES: dict[str, dict[str, Any]] = {
             (0.14, 0.48),
         ),
     },
+    "v12": {
+        "model_version": "reference-dualbranch-v12-r1-recall",
+        "training_objective": "dual_branch_v12_absolute_regime_live_replay",
+        "reward_first": True,
+        "holdout_gated_selection": True,
+        "extended_regime_grid": True,
+        "dual_fpr_selection": True,
+        "max_full_fpr": 0.015,
+        "live_regime_mode": "absolute",
+        "max_fpr": 0.005,
+        "max_positive_rate": 0.05,
+        "live_human_max_positive_rate": 0.0,
+        "live_bot_max_positive_rate": 0.24,
+        "live_human_score_ceiling": 0.49,
+        "live_bot_score_ceiling": 0.66,
+        "spread_blend": 0.94,
+        "live_augment_default": False,
+        "benchmark_only_selection": True,
+        "live_score_ceiling": 0.49,
+        "hybrid_isolation": True,
+        "regime_calibration": True,
+        "chunk_regime": True,
+        "live_batch_size": 80,
+        "holdout_dates": 8,
+        "min_bot_recall": 0.45,
+        "center_blends": (0.0,),
+        "spread_bounds": (
+            (None, None),
+            (0.10, 0.42),
+            (0.12, 0.45),
+            (0.14, 0.48),
+        ),
+    },
 }
 
 
@@ -356,6 +389,8 @@ def _simulate_live_scores(
             chunk_regime=True,
             regime_mode=str(settings.get("live_regime_mode", "absolute") or "absolute"),
             human_fraction=float(settings.get("live_human_fraction", 0.35) or 0.35),
+            apply_positive_cap=False,
+            apply_miner_cap_replay=True,
         )
     return simulate_live_miner_scores(
         scores,
@@ -440,6 +475,7 @@ def sweep_blend(
     regime_mode: str = "absolute",
     human_fraction: float = 0.35,
     dual_fpr: bool = False,
+    max_full_fpr: float | None = None,
 ) -> tuple[float, dict[str, Any], dict[str, Any], np.ndarray, np.ndarray]:
     calibration_kwargs = calibration_kwargs or {}
     regime_overrides = regime_overrides or {}
@@ -485,6 +521,10 @@ def sweep_blend(
                 bot_hard_ceiling=float(bot_ceiling) if bot_ceiling is not None else None,
                 regime_scores=supervised,
                 chunk_regime=chunk_regime,
+                regime_mode=regime_mode,
+                human_fraction=human_fraction,
+                apply_positive_cap=False,
+                apply_miner_cap_replay=True,
             )
             settings = {
                 "live_batch_spread": True,
@@ -546,6 +586,7 @@ def sweep_blend(
                 regime_mode=regime_mode,
                 human_fraction=human_fraction,
                 dual_fpr=dual_fpr,
+                max_full_fpr=max_full_fpr,
             )
         else:
             settings, metrics = select_live_calibration(
@@ -725,20 +766,34 @@ def evaluate_artifact_reward(
     md = artifact.get("metadata") or {}
     boost = float(md.get("live_batch_rank_boost", 0.0) or 0.0)
     raw = np.zeros(len(x), dtype=float)
+    supervised = np.zeros(len(x), dtype=float)
     for group_id in np.unique(groups):
         mask = groups == group_id
         batch_x = x[mask]
         batch_features = [feature_dicts[int(idx)] for idx in np.where(mask)[0]]
         if hasattr(model, "predict_chunk_scores"):
-            raw[mask] = np.asarray(
+            batch_raw = np.asarray(
                 model.predict_chunk_scores(
                     [[] for _ in range(int(mask.sum()))],
                     feature_rows=[list(row) for row in batch_x],
                 ),
                 dtype=float,
             )
+            raw[mask] = batch_raw
+            if hasattr(model, "predict_supervised_raw_scores"):
+                supervised[mask] = np.asarray(
+                    model.predict_supervised_raw_scores(
+                        [[] for _ in range(int(mask.sum()))],
+                        feature_rows=[list(row) for row in batch_x],
+                    ),
+                    dtype=float,
+                )
+            else:
+                supervised[mask] = batch_raw
         else:
-            raw[mask] = np.asarray(model.predict_proba(batch_x))[:, 1]
+            batch_proba = np.asarray(model.predict_proba(batch_x))[:, 1]
+            raw[mask] = batch_proba
+            supervised[mask] = batch_proba
         if boost > 0.0:
             boosted = batch_rank_boost(
                 batch_features,
@@ -746,18 +801,15 @@ def evaluate_artifact_reward(
                 blend=boost,
             )
             raw[mask] = np.asarray(boosted, dtype=float)
-    live = simulate_live_miner_scores(
+            supervised[mask] = np.maximum(supervised[mask], raw[mask])
+    max_rate = float(md.get("live_max_positive_rate", 0.10) or 0.10)
+    live_batch_size = int(md.get("live_batch_size", 80) or 80)
+    live = _simulate_live_scores(
         raw,
-        bias=float(md.get("score_logit_bias", 2.2) or 2.2),
-        temperature=float(md.get("score_logit_temperature", 0.65) or 0.65),
-        spread_blend=float(md.get("live_batch_spread_blend", 0.70) or 0.70),
-        center_blend=float(md.get("live_batch_center_blend", 0.0) or 0.0),
-        spread_low=md.get("live_batch_spread_low"),
-        spread_high=md.get("live_batch_spread_high"),
-        max_positive_rate=float(md.get("live_max_positive_rate", 0.10) or 0.10),
-        logit_mode=str(md.get("live_logit_mode", "adaptive") or "adaptive"),
-        target_median=float(md.get("live_logit_target_median", 0.24) or 0.24),
-        hard_ceiling=md.get("live_score_ceiling", 0.49),
+        md,
+        max_positive_rate=max_rate,
+        regime_scores=supervised,
+        live_batch_size=live_batch_size,
     )
     rew, _ = reward(live, y)
     return float(rew)
@@ -929,6 +981,8 @@ def main() -> None:
     regime_mode = str(profile.get("live_regime_mode", "absolute") or "absolute")
     human_fraction = float(profile.get("live_human_fraction", 0.35) or 0.35)
     dual_fpr = bool(profile.get("dual_fpr_selection", False))
+    max_full_fpr = profile.get("max_full_fpr")
+    max_full_fpr = float(max_full_fpr) if max_full_fpr is not None else None
     selection_holdout_mask: np.ndarray | None = None
     spearman_eval_mask: np.ndarray | None = None
     pseudo_weight = float(args.pseudo_weight)
@@ -1080,6 +1134,7 @@ def main() -> None:
         regime_mode=regime_mode,
         human_fraction=human_fraction,
         dual_fpr=dual_fpr,
+        max_full_fpr=max_full_fpr,
     )
 
     rank_boost, rank_metrics = sweep_rank_boost(
