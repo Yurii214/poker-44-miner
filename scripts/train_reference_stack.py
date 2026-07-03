@@ -547,9 +547,13 @@ def select_regime_calibration(
         (0.26, 0.58),
         (0.28, 0.62),
     )
-    bot_ceilings = (0.58, 0.60, 0.62, 0.65, 0.68) if extended_grid else (bot_hard_ceiling or 0.58,)
+    bot_ceilings = (
+        (0.58, 0.60, 0.62, 0.65, 0.68, 0.70, 0.72)
+        if extended_grid
+        else (bot_hard_ceiling or 0.58,)
+    )
     bot_rates = (
-        (0.18, 0.20, 0.22, 0.24, 0.26, 0.28)
+        (0.18, 0.20, 0.22, 0.24, 0.26, 0.28, 0.30, 0.32)
         if extended_grid and bot_max_positive_rate is not None
         else (float(bot_max_positive_rate) if bot_max_positive_rate is not None else max_positive_rate,)
     )
