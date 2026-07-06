@@ -79,7 +79,8 @@ def main() -> int:
             "model_card_url": f"{repo_url}/blob/main/README.md",
             "notes": (
                 "Dual-branch hybrid stack (LGBM rank + isolation forest) with "
-                "regime-aware live calibration; trained on benchmark v1.12."
+                "regime-aware live calibration; trained on public benchmark v1.13 "
+                "(30 release dates, diverse bot profiles)."
             ),
         },
     )
