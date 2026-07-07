@@ -18,34 +18,32 @@ from poker44.utils.model_manifest import build_local_model_manifest, sha256_file
 
 def main() -> int:
     repo_url = "https://github.com/Yurii214/poker-44-miner"
+    # Must match the runtime rank-head manifest in neurons/miner.py so the
+    # attested implementation_sha256 is identical to what the miner attaches.
     implementation_files = [
         ROOT / "neurons/miner.py",
+        ROOT / "poker44_ml/top_inference.py",
+        ROOT / "poker44_ml/top_model.py",
+        ROOT / "poker44_ml/rank_features.py",
+        ROOT / "poker44_ml/rank_reward.py",
         ROOT / "poker44_ml/features.py",
         ROOT / "poker44_ml/consistency_features.py",
-        ROOT / "poker44_ml/anomaly_branch.py",
-        ROOT / "poker44_ml/inference.py",
-        ROOT / "poker44_ml/innovative_model.py",
-        ROOT / "poker44_ml/stacked.py",
-        ROOT / "poker44_ml/rank_stack.py",
-        ROOT / "poker44_ml/calibration.py",
+        ROOT / "poker44_ml/robust_features.py",
     ]
-    artifact_rel = "models/bot_detector_v1.joblib"
+    artifact_rel = "models/bot_detector_top.joblib"
     artifact_path = ROOT / artifact_rel
-    model_name = "poker44-innovative-dual-branch"
-    model_version = "reference-dualbranch-v4-live"
+    model_name = "poker44-rankfirst-ensemble"
+    model_version = "top-v1"
     if artifact_path.is_file():
         artifact = joblib.load(artifact_path)
-        metadata = dict(artifact.get("metadata") or {})
-        model_name = str(
-            metadata.get("model_name")
-            or artifact.get("model_name")
-            or model_name
-        )
-        model_version = str(
-            artifact.get("model_version")
-            or metadata.get("model_version")
-            or model_version
-        )
+        if isinstance(artifact, dict):
+            metadata = dict(artifact.get("metadata") or {})
+            raw_version = artifact.get("model_version")
+        else:  # dataclass artifact (TopEnsemble) exposes .metadata
+            metadata = dict(getattr(artifact, "metadata", {}) or {})
+            raw_version = None
+        model_name = str(metadata.get("model_name") or model_name)
+        model_version = str(raw_version or metadata.get("model_version") or model_version)
     data_statement = (
         "Trained on public Poker44 benchmark releases fetched from "
         "https://api.poker44.net/api/v1/benchmark using miner-visible hand payloads."
@@ -56,7 +54,7 @@ def main() -> int:
         defaults={
             "model_name": model_name,
             "model_version": model_version,
-            "framework": "lightgbm-xgboost-batch-rank-stack-quantile-remap",
+            "framework": "lightgbm-xgboost-oof-stacked-ensemble-within-batch-rank",
             "license": "MIT",
             "repo_url": repo_url,
             "open_source": True,
@@ -78,9 +76,11 @@ def main() -> int:
             "artifact_sha256": sha256_file(artifact_path) if artifact_path.is_file() else "",
             "model_card_url": f"{repo_url}/blob/main/README.md",
             "notes": (
-                "Dual-branch hybrid stack (LGBM rank + isolation forest) with "
-                "regime-aware live calibration; trained on public benchmark v1.13 "
-                "(30 release dates, diverse bot profiles)."
+                "Diverse OOF-stacked GBDT ensemble (3x LightGBM + XGBoost + "
+                "ExtraTrees + RandomForest) on scale-invariant behavioural, "
+                "sequence-collision, temporal-consistency and pot-fraction "
+                "features; served via within-batch rank normalisation. Trained on "
+                "public benchmark releases (30 dates) from api.poker44.net."
             ),
         },
     )

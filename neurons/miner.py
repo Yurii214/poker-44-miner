@@ -17,6 +17,7 @@ from poker44.utils.model_manifest import (
 )
 from poker44.validator.synapse import DetectionSynapse
 from poker44_ml.inference import DEFAULT_MODEL_PATH, Poker44Model
+from poker44_ml.top_inference import DEFAULT_TOP_MODEL_PATH, TopMinerModel
 from poker44_ml.live_chunk_store import is_logging_enabled, log_validator_batch
 
 DEFAULT_MAX_POSITIVE_RATE = 0.10
@@ -35,7 +36,20 @@ class Miner(BaseMinerNeuron):
         if not model_path.is_absolute():
             model_path = repo_root / model_path
 
-        self.detector = Poker44Model(model_path=model_path)
+        # Prefer the rank-first top-miner ensemble when its artifact is present;
+        # fall back to the legacy dual-branch model otherwise.
+        top_path = Path(
+            os.getenv("POKER44_TOP_MODEL_PATH", str(DEFAULT_TOP_MODEL_PATH))
+        )
+        if not top_path.is_absolute():
+            top_path = repo_root / top_path
+        if top_path.is_file():
+            self.detector = TopMinerModel(model_path=top_path)
+            self.use_rank_head = True
+            bt.logging.info(f"Using rank-first top-miner model: {top_path}")
+        else:
+            self.detector = Poker44Model(model_path=model_path)
+            self.use_rank_head = False
         self.enable_debug_components = os.getenv(
             "POKER44_MINER_DEBUG_COMPONENTS",
             "0",
@@ -57,22 +71,38 @@ class Miner(BaseMinerNeuron):
             f"reward={metrics.get('reward', 'unknown')}"
         )
 
-        implementation_files = [
-            Path(__file__).resolve(),
-            repo_root / "poker44_ml" / "features.py",
-            repo_root / "poker44_ml" / "inference.py",
-            repo_root / "poker44_ml" / "innovative_model.py",
-            repo_root / "poker44_ml" / "stacked.py",
-            repo_root / "poker44_ml" / "rank_stack.py",
-            repo_root / "poker44_ml" / "calibration.py",
-            repo_root / "poker44_ml" / "consistency_features.py",
-            repo_root / "poker44_ml" / "anomaly_branch.py",
-        ]
+        if self.use_rank_head:
+            implementation_files = [
+                Path(__file__).resolve(),
+                repo_root / "poker44_ml" / "top_inference.py",
+                repo_root / "poker44_ml" / "top_model.py",
+                repo_root / "poker44_ml" / "rank_features.py",
+                repo_root / "poker44_ml" / "rank_reward.py",
+                repo_root / "poker44_ml" / "features.py",
+                repo_root / "poker44_ml" / "consistency_features.py",
+                repo_root / "poker44_ml" / "robust_features.py",
+            ]
+        else:
+            implementation_files = [
+                Path(__file__).resolve(),
+                repo_root / "poker44_ml" / "features.py",
+                repo_root / "poker44_ml" / "inference.py",
+                repo_root / "poker44_ml" / "innovative_model.py",
+                repo_root / "poker44_ml" / "stacked.py",
+                repo_root / "poker44_ml" / "rank_stack.py",
+                repo_root / "poker44_ml" / "calibration.py",
+                repo_root / "poker44_ml" / "consistency_features.py",
+                repo_root / "poker44_ml" / "anomaly_branch.py",
+            ]
         repo_url = os.getenv(
             "POKER44_MODEL_REPO_URL",
             "https://github.com/Yurii214/poker-44-miner",
         ).strip()
-        artifact_rel = "models/bot_detector_v1.joblib"
+        artifact_rel = (
+            "models/bot_detector_top.joblib"
+            if self.use_rank_head
+            else "models/bot_detector_v1.joblib"
+        )
         artifact_path = repo_root / artifact_rel
         artifact_sha256 = (
             sha256_file(artifact_path) if artifact_path.is_file() else ""
@@ -90,7 +120,11 @@ class Miner(BaseMinerNeuron):
                     "poker44-reference-stack",
                 ),
                 "model_version": self.detector.model_version,
-                "framework": "lightgbm-xgboost-batch-rank-stack-quantile-remap",
+                "framework": (
+                    "lightgbm-xgboost-oof-stacked-ensemble-within-batch-rank"
+                    if self.use_rank_head
+                    else "lightgbm-xgboost-batch-rank-stack-quantile-remap"
+                ),
                 "license": "MIT",
                 "repo_url": repo_url,
                 "notes": "Dual-branch benchmark stack with bounded live calibration.",
@@ -249,18 +283,23 @@ class Miner(BaseMinerNeuron):
 
     async def forward(self, synapse: DetectionSynapse) -> DetectionSynapse:
         chunks = synapse.chunks or []
-        components: dict[str, list[float]] = {}
-        if self.enable_debug_components:
-            components = self.detector.debug_score_components(chunks)
-            raw_scores = components.get("final_scores") or self.detector.predict_chunk_scores(chunks)
+        if self.use_rank_head:
+            # Rank-first head: predict_chunk_scores already returns within-batch
+            # rank-normalised scores in [0, 1]; no positive-rate cap is applied.
+            scores = self.detector.predict_chunk_scores(chunks)
         else:
-            raw_scores = self.detector.predict_chunk_scores(chunks)
-        hybrid_raw = (
-            components.get("raw_scores")
-            if components
-            else self.detector.predict_supervised_raw_scores(chunks)
-        )
-        scores = self._apply_live_positive_cap(raw_scores, hybrid_raw)
+            components: dict[str, list[float]] = {}
+            if self.enable_debug_components:
+                components = self.detector.debug_score_components(chunks)
+                raw_scores = components.get("final_scores") or self.detector.predict_chunk_scores(chunks)
+            else:
+                raw_scores = self.detector.predict_chunk_scores(chunks)
+            hybrid_raw = (
+                components.get("raw_scores")
+                if components
+                else self.detector.predict_supervised_raw_scores(chunks)
+            )
+            scores = self._apply_live_positive_cap(raw_scores, hybrid_raw)
         synapse.risk_scores = scores
         synapse.predictions = [score >= 0.5 for score in scores]
         synapse.model_manifest = dict(self.model_manifest)

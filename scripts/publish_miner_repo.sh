@@ -85,7 +85,9 @@ git add \
   poker44_ml/ \
   poker44/utils/model_manifest.py \
   models/bot_detector_v1.joblib \
+  models/bot_detector_top.joblib \
   models/model_manifest.json \
+  scripts/train_top_miner.py \
   scripts/generate_release_manifest.py \
   scripts/patch_live_calibration.py \
   scripts/train_innovative_model.py \
@@ -169,10 +171,16 @@ MODEL_VERSION="$("${PYTHON}" - <<'PY'
 import joblib
 from pathlib import Path
 
-path = Path("models/bot_detector_v1.joblib")
+path = Path("models/bot_detector_top.joblib")
+if not path.exists():
+    path = Path("models/bot_detector_v1.joblib")
 if path.exists():
     artifact = joblib.load(path)
-    print(artifact.get("model_version") or artifact.get("metadata", {}).get("model_version", ""))
+    version = getattr(artifact, "metadata", None)
+    if isinstance(version, dict):
+        print(version.get("model_version", ""))
+    else:
+        print(artifact.get("model_version") or artifact.get("metadata", {}).get("model_version", ""))
 PY
 )"
 if [[ -n "${MODEL_VERSION}" ]]; then
