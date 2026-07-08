@@ -119,7 +119,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--min-source-date", default=None)
     ap.add_argument("--holdout-dates", type=int, default=2)
-    ap.add_argument("--human-weight", type=float, default=20.0)
+    ap.add_argument("--human-weight", type=float, default=1.0)
     ap.add_argument("--recency-weight", type=float, default=6.0)
     ap.add_argument("--recency-days", type=int, default=8)
     ap.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
@@ -165,7 +165,7 @@ def main() -> None:
         "human_weight": args.human_weight,
         "recency_weight": args.recency_weight,
         "recency_days": args.recency_days,
-        "serving": "within_batch_rank_normalized",
+        "serving": "raw_probability",
     })
 
     import joblib

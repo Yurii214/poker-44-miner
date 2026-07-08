@@ -27,35 +27,35 @@ import xgboost as xgb
 
 
 def _base_learners() -> dict[str, Any]:
-    """Return a fresh, diverse set of base classifiers."""
+    """Return a fresh, diverse set of base classifiers.
+
+    Deliberately REGULARIZED (shallow trees, high min_child, strong L1/L2,
+    feature/row subsampling) to avoid memorizing the ~700-chunk public benchmark
+    -- unregularized deep trees achieved perfect benchmark separation
+    (human std == 0) and then collapsed to ~0.01 on the shifted live feed.
+    """
     return {
         "lgbm_a": lgb.LGBMClassifier(
-            n_estimators=600, learning_rate=0.02, num_leaves=31,
-            min_child_samples=20, subsample=0.85, colsample_bytree=0.8,
-            reg_lambda=1.0, random_state=42, n_jobs=-1, verbose=-1,
+            n_estimators=300, learning_rate=0.03, num_leaves=15, max_depth=4,
+            min_child_samples=40, subsample=0.8, colsample_bytree=0.6,
+            reg_lambda=5.0, reg_alpha=1.0, random_state=42, n_jobs=-1, verbose=-1,
         ),
         "lgbm_b": lgb.LGBMClassifier(
-            n_estimators=400, learning_rate=0.02, num_leaves=15, max_depth=4,
-            min_child_samples=30, reg_lambda=5.0, reg_alpha=2.0,
-            random_state=123, n_jobs=-1, verbose=-1,
-        ),
-        "lgbm_c": lgb.LGBMClassifier(
-            n_estimators=700, learning_rate=0.015, num_leaves=63,
-            min_child_samples=15, subsample=0.8, colsample_bytree=0.7,
-            reg_lambda=2.0, boosting_type="goss", random_state=7,
-            n_jobs=-1, verbose=-1,
+            n_estimators=250, learning_rate=0.03, num_leaves=31,
+            min_child_samples=30, subsample=0.8, colsample_bytree=0.7,
+            reg_lambda=3.0, random_state=123, n_jobs=-1, verbose=-1,
         ),
         "xgb": xgb.XGBClassifier(
-            n_estimators=500, learning_rate=0.025, max_depth=6,
-            subsample=0.85, colsample_bytree=0.8, reg_lambda=1.5,
-            eval_metric="logloss", random_state=31, n_jobs=-1,
+            n_estimators=300, learning_rate=0.03, max_depth=4,
+            min_child_weight=5, subsample=0.8, colsample_bytree=0.7,
+            reg_lambda=3.0, eval_metric="logloss", random_state=31, n_jobs=-1,
         ),
         "extratrees": ExtraTreesClassifier(
-            n_estimators=600, min_samples_leaf=3, max_features=0.4,
+            n_estimators=400, min_samples_leaf=8, max_features=0.3,
             random_state=17, n_jobs=-1,
         ),
         "randomforest": RandomForestClassifier(
-            n_estimators=500, min_samples_leaf=3, max_features=0.5,
+            n_estimators=400, min_samples_leaf=8, max_features=0.4,
             random_state=71, n_jobs=-1,
         ),
     }

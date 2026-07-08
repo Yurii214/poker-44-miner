@@ -67,7 +67,15 @@ class TopMinerModel:
         return [float(v) for v in self.model.predict_from_dicts(feats)]
 
     def predict_chunk_scores(self, chunks: Sequence[Sequence[dict]]) -> list[float]:
-        """Return one within-batch-rank-normalised bot-risk score per chunk."""
+        """Return one bot-risk score per chunk.
+
+        Default is the RAW absolute probability: it stays comparable across the
+        validator's scoring window, which may pool multiple miner queries with
+        different bot/human compositions. Per-query within-batch rank
+        normalisation would make scores incomparable across those queries and is
+        only used if the artifact explicitly requests it.
+        """
         raw = self.predict_raw_scores(chunks)
-        ranked = within_batch_rank_scores(raw)
-        return [round(float(v), 6) for v in ranked]
+        if str(self.metadata.get("serving", "raw")).startswith("within_batch_rank"):
+            raw = within_batch_rank_scores(raw)
+        return [round(float(v), 6) for v in raw]
