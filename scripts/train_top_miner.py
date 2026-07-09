@@ -91,12 +91,24 @@ def build_dataset(min_source_date: str | None):
     return feats, np.asarray(labels, dtype=int), np.asarray(dates)
 
 
+STABLE_FEATURES_PATH = REPO_ROOT / "models" / "stable_features.json"
+
+
 def select_feature_names(feature_dicts: list[dict[str, float]]) -> list[str]:
     all_names = sorted({n for d in feature_dicts for n in d})
+    # If a domain-stability feature set exists, restrict to it: the public
+    # benchmark is a DIFFERENT distribution from the live eval (adversarial
+    # AUC=1.0), so only features that carry bot signal AND do not shift
+    # benchmark->live transfer. This trades (mirage) benchmark score for real
+    # cross-domain transfer. Refresh with scripts/select_stable_features.py.
+    if STABLE_FEATURES_PATH.is_file():
+        stable = set(json.loads(STABLE_FEATURES_PATH.read_text()).get("features", []))
+        chosen = sorted(stable & set(all_names))
+        if len(chosen) >= 20:
+            return chosen
     robust = set(filter_robust_feature_names(all_names))
-    # Always include our scale-invariant supplementary families.
     robust.update(n for n in all_names if n.startswith("xseq_"))
-    robust.discard("hand_count")  # absolute count is not scale-invariant
+    robust.discard("hand_count")
     return sorted(robust)
 
 

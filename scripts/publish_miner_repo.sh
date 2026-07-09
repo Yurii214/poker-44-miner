@@ -86,8 +86,13 @@ git add \
   poker44/utils/model_manifest.py \
   models/bot_detector_v1.joblib \
   models/bot_detector_top.joblib \
+  models/stable_features.json \
   models/model_manifest.json \
   scripts/train_top_miner.py \
+  scripts/select_stable_features.py \
+  scripts/track_live_score.py \
+  scripts/auto_retrain_top.py \
+  scripts/auto_retrain_top.sh \
   scripts/generate_release_manifest.py \
   scripts/patch_live_calibration.py \
   scripts/train_innovative_model.py \

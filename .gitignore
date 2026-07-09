@@ -26,6 +26,7 @@ model/*
 models/*
 !models/bot_detector_v1.joblib
 !models/bot_detector_top.joblib
+!models/stable_features.json
 !models/model_manifest.json
 models/live_chunks/
 models/benchmark_state.json

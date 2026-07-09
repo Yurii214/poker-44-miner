@@ -283,12 +283,18 @@ class Miner(BaseMinerNeuron):
 
     async def forward(self, synapse: DetectionSynapse) -> DetectionSynapse:
         chunks = synapse.chunks or []
+        components: dict[str, list[float]] = {}
+        hybrid_raw: list[float] | None = None
         if self.use_rank_head:
-            # Rank-first head: predict_chunk_scores already returns within-batch
-            # rank-normalised scores in [0, 1]; no positive-rate cap is applied.
+            # Rank-first head: predict_chunk_scores returns the served scores
+            # directly; no positive-rate cap. Keep the raw model scores for the
+            # live-chunk log without an extra model pass where possible.
             scores = self.detector.predict_chunk_scores(chunks)
+            try:
+                hybrid_raw = self.detector.predict_raw_scores(chunks)
+            except Exception:  # noqa: BLE001 - logging aid only, never break scoring
+                hybrid_raw = scores
         else:
-            components: dict[str, list[float]] = {}
             if self.enable_debug_components:
                 components = self.detector.debug_score_components(chunks)
                 raw_scores = components.get("final_scores") or self.detector.predict_chunk_scores(chunks)
