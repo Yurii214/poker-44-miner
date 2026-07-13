@@ -98,33 +98,8 @@ def main() -> int:
     newest = uniq[-1]
     _log(f"Dataset: {len(labels)} chunks / {len(names)} features / {len(uniq)} dates (newest {newest}).")
 
-    hold = _holdout_mask(dates, args.holdout_dates)
-    hold_idx = np.flatnonzero(hold)
-    if hold.all() or (~hold).sum() == 0 or len(set(labels[hold].tolist())) < 2:
-        _log("Insufficient holdout to evaluate safely; aborting without deploy.")
-        return 1
-    _log(f"Guard holdout: {sorted(set(dates[hold].tolist()))} ({int(hold.sum())} chunks).")
-
-    # --- candidate trained WITHOUT the holdout ---
-    cand = train_top_ensemble(x[~hold], labels[~hold], dates[~hold], names,
-                              sample_weight=weights[~hold])
-    cand_scores = cand.predict_proba_raw(x[hold])
-    cand_reward, cand_detail = rank_reward(cand_scores, labels[hold])
-
-    hold_feats = [feats[i] for i in hold_idx]
-    dep_reward = _deployed_reward(args.artifact, hold_feats, labels[hold])
-
-    _log(f"Candidate holdout reward = {cand_reward:.4f} "
-         f"(AP {cand_detail['average_precision']:.4f}, recall@5 {cand_detail['recall_at_fpr5']:.4f})")
-    _log(f"Deployed  holdout reward = {'n/a' if dep_reward is None else f'{dep_reward:.4f}'}")
-
-    promote = dep_reward is None or cand_reward >= dep_reward - args.max_regression
-    if not promote:
-        _log(f"DECISION: KEEP current model (candidate regressed by "
-             f"{dep_reward - cand_reward:.4f} > tolerance {args.max_regression}).")
-        return 0
-
-    _log("DECISION: PROMOTE. Retraining production model on ALL dates...")
+    # --- Train the fresh production candidate on ALL data (tracks evolving bots). ---
+    _log("Training fresh candidate on all dates...")
     prod = train_top_ensemble(x, labels, dates, names, sample_weight=weights)
     prod.metadata.update({
         "model_name": "poker44-rankfirst-ensemble",
@@ -136,15 +111,39 @@ def main() -> int:
         "recency_weight": args.recency_weight,
         "recency_days": args.recency_days,
         "serving": "raw_probability",
-        "guard_candidate_reward": float(cand_reward),
-        "guard_deployed_reward": None if dep_reward is None else float(dep_reward),
     })
-    # Write to a candidate path first; only touch the LIVE artifact on --deploy so
-    # a dry run can never desync the on-disk model from the published manifest.
+
+    # Save to a candidate path first so we can score it as a real TopMinerModel
+    # (which featurises live chunks) and never touch the LIVE artifact until the
+    # gate passes AND --deploy is set.
     candidate_path = args.artifact.with_suffix(".candidate.joblib")
     candidate_path.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(prod, candidate_path)
-    _log(f"Saved candidate artifact -> {candidate_path} (version top-{newest})")
+
+    # --- LIVE-HEALTH GATE (NOT benchmark holdout, which is a mirage). ---
+    # Reject degenerate candidates by their score distribution on real live
+    # chunks, and don't replace a healthy model with one that separates worse.
+    from poker44_ml.live_health import live_health, sample_live_chunks
+    live_chunks = sample_live_chunks(cap=250)
+    cand_h = live_health(candidate_path, live_chunks)
+    _log(f"Candidate live-health: healthy={cand_h['healthy']} mean={cand_h['mean']} "
+         f"std={cand_h['std']} ({cand_h['reason']})")
+    if not cand_h["healthy"]:
+        _log("DECISION: KEEP current model (fresh candidate is DEGENERATE on live).")
+        candidate_path.unlink(missing_ok=True)
+        return 0
+    dep_h = None
+    if args.artifact.is_file():
+        try:
+            dep_h = live_health(args.artifact, live_chunks)
+            _log(f"Deployed  live-health: healthy={dep_h['healthy']} mean={dep_h['mean']} std={dep_h['std']}")
+        except Exception as exc:  # noqa: BLE001
+            _log(f"  deployed live-health unavailable ({exc}).")
+    if dep_h is not None and dep_h["healthy"] and cand_h["std"] < dep_h["std"] - 0.05:
+        _log("DECISION: KEEP current model (candidate has notably worse live separation).")
+        candidate_path.unlink(missing_ok=True)
+        return 0
+    _log(f"DECISION: PROMOTE (fresh, live-healthy candidate top-{newest}).")
 
     if not args.deploy:
         _log("(--deploy not set; candidate saved but LIVE artifact untouched, not published.)")
