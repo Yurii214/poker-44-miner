@@ -24,8 +24,10 @@ import numpy as np
 REPO = Path(__file__).resolve().parents[1]
 
 # Healthy live score distribution: centered, well-spread (a real classifier).
-HEALTHY_MEAN = (0.30, 0.70)
-HEALTHY_STD_MIN = 0.10
+# Upper mean bound catches compressed-high drift (scoring everything ~bot);
+# std floor catches low-separation collapse.
+HEALTHY_MEAN = (0.30, 0.68)
+HEALTHY_STD_MIN = 0.13
 
 
 def sample_live_chunks(cap: int = 250, recent_files: int = 5) -> list[list[dict]]:
