@@ -26,7 +26,7 @@ fi
 {
   echo "====================================================================="
   echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') auto_retrain_top START"
-  "${ROOT}/miner_env/bin/python" -W ignore "${ROOT}/scripts/auto_retrain_top.py" --deploy
+  "${ROOT}/miner_env/bin/python" -W ignore "${ROOT}/scripts/train_live_native.py" --deploy
   rc=$?
   echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') auto_retrain_top END (exit ${rc})"
 } >>"${LOG}" 2>&1
