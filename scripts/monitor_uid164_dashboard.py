@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Monitor UID 164 competition metrics and manifest status on poker44.net."""
+"""Monitor UID 141 competition metrics and manifest status on poker44.net."""
 
 from __future__ import annotations
 
@@ -103,7 +103,7 @@ def append_log(path: Path, text: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--uid", type=int, default=164)
+    parser.add_argument("--uid", type=int, default=141)
     parser.add_argument("--model", type=Path, default=REPO_ROOT / "models" / "bot_detector_v1.joblib")
     parser.add_argument("--poll-seconds", type=int, default=300)
     parser.add_argument("--max-updates", type=int, default=0, help="0 = run once")

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Append UID 166's LIVE competition standing to models/live_score_history.jsonl.
+"""Append UID 141's LIVE competition standing to models/live_score_history.jsonl.
 
 The public benchmark is a different distribution from the live eval (adversarial
 AUC=1.0), so benchmark reward does NOT predict rank. The leaderboard composite is
@@ -36,7 +36,7 @@ def served_version() -> str:
         return "unknown"
 
 
-def main(uid: int = 166) -> None:
+def main(uid: int = 141) -> None:
     lb = _get(LEADERBOARD)["data"]
     ep = lb.get("epoch", {})
     rows = lb.get("rows", [])
@@ -69,5 +69,5 @@ def main(uid: int = 166) -> None:
 
 
 if __name__ == "__main__":
-    uid = int(sys.argv[sys.argv.index("--uid") + 1]) if "--uid" in sys.argv else 166
+    uid = int(sys.argv[sys.argv.index("--uid") + 1]) if "--uid" in sys.argv else 141
     main(uid)

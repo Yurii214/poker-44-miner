@@ -68,7 +68,7 @@ def retune(model_path: Path, target: float) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--uid", type=int, default=164)
+    parser.add_argument("--uid", type=int, default=141)
     parser.add_argument("--model", type=Path, default=REPO_ROOT / "models" / "bot_detector_v1.joblib")
     parser.add_argument("--poll-seconds", type=int, default=180)
     parser.add_argument("--max-updates", type=int, default=6)
