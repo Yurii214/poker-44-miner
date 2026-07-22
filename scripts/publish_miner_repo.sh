@@ -87,8 +87,10 @@ git add \
   models/bot_detector_v1.joblib \
   models/bot_detector_top.joblib \
   models/stable_features.json \
+  models/ngram_vocab.json \
   models/model_manifest.json \
   scripts/train_top_miner.py \
+  scripts/train_top_ngram.py \
   scripts/select_stable_features.py \
   scripts/track_live_score.py \
   scripts/auto_retrain_top.py \

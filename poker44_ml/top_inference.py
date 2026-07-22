@@ -57,8 +57,21 @@ class TopMinerModel:
     def _features(self, chunks: Sequence[Sequence[dict]]) -> list[dict[str, float]]:
         from poker44_ml.rank_features import top_chunk_features
 
-        # Live chunks arrive already miner-visible (validator-sanitised).
-        return [top_chunk_features(chunk, already_prepared=True) for chunk in chunks]
+        # Action n-gram columns are only present when the artifact was trained
+        # with them; the frozen (stability-filtered) vocabulary travels inside
+        # the artifact metadata so train and serve featurise identically.
+        ngram_vocab = list(self.metadata.get("ngram_vocab") or [])
+        if ngram_vocab:
+            from poker44_ml.ngram_features import ngram_features
+
+        out: list[dict[str, float]] = []
+        for chunk in chunks:
+            # Live chunks arrive already miner-visible (validator-sanitised).
+            feats = top_chunk_features(chunk, already_prepared=True)
+            if ngram_vocab:
+                feats.update(ngram_features(chunk, vocab=ngram_vocab))
+            out.append(feats)
+        return out
 
     def predict_raw_scores(self, chunks: Sequence[Sequence[dict]]) -> list[float]:
         if not chunks:

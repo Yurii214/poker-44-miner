@@ -25,6 +25,7 @@ def main() -> int:
         ROOT / "poker44_ml/top_inference.py",
         ROOT / "poker44_ml/top_model.py",
         ROOT / "poker44_ml/rank_features.py",
+        ROOT / "poker44_ml/ngram_features.py",
         ROOT / "poker44_ml/rank_reward.py",
         ROOT / "poker44_ml/features.py",
         ROOT / "poker44_ml/consistency_features.py",

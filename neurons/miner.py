@@ -77,6 +77,7 @@ class Miner(BaseMinerNeuron):
                 repo_root / "poker44_ml" / "top_inference.py",
                 repo_root / "poker44_ml" / "top_model.py",
                 repo_root / "poker44_ml" / "rank_features.py",
+                repo_root / "poker44_ml" / "ngram_features.py",
                 repo_root / "poker44_ml" / "rank_reward.py",
                 repo_root / "poker44_ml" / "features.py",
                 repo_root / "poker44_ml" / "consistency_features.py",
